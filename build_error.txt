@@ -1,0 +1,19 @@
+
+[90mWXT[39m [90m[1m0.20.13[22m[39m
+[36mℹ[39m Building [36mchrome-mv3[39m for [36mproduction[39m with [32mVite 7.3.0[39m
+- Preparing...
+[32m✔[39m Built extension in 1.552 s
+[90m  ├─[39m [2m.output\chrome-mv3\[22m[34mmanifest.json[39m               [2m790 B[22m    
+[90m  ├─[39m [2m.output\chrome-mv3\[22m[32mpopup.html[39m                  [2m457 B[22m    
+[90m  ├─[39m [2m.output\chrome-mv3\[22m[36mbackground.js[39m               [2m98.38 kB[22m 
+[90m  ├─[39m [2m.output\chrome-mv3\[22m[36mchunks\popup-CUNcSCzE.js[39m    [2m226.45 kB[22m
+[90m  ├─[39m [2m.output\chrome-mv3\[22m[36mcontent-scripts\content.js[39m  [2m4.42 kB[22m  
+[90m  ├─[39m [2m.output\chrome-mv3\[22m[35massets\popup-BGb0qE82.css[39m   [2m336 B[22m    
+[90m  ├─[39m [2m.output\chrome-mv3\[22m[34micon\128.png[39m                [2m3.07 kB[22m  
+[90m  ├─[39m [2m.output\chrome-mv3\[22m[34micon\16.png[39m                 [2m559 B[22m    
+[90m  ├─[39m [2m.output\chrome-mv3\[22m[34micon\32.png[39m                 [2m916 B[22m    
+[90m  ├─[39m [2m.output\chrome-mv3\[22m[34micon\48.png[39m                 [2m1.33 kB[22m  
+[90m  ├─[39m [2m.output\chrome-mv3\[22m[34micon\96.png[39m                 [2m2.37 kB[22m  
+[90m  └─[39m [2m.output\chrome-mv3\[22m[34mwxt.svg[39m                     [2m1.07 kB[22m  
+[36mΣ Total size:[39m 340.15 kB                                              
+[32m✔[39m Finished in 1.580 s
