@@ -17,12 +17,13 @@ interface ProductData {
     productImages: string[];
     reviewImages: string[];
     videos: string[];
+    reviewVideos: string[];
     listingProducts: ProductItem[];
 }
 
 interface PanelAppProps {
     onClose: () => void;
-    scrapeProductData: () => ProductData;
+    scrapeProductData: () => Promise<ProductData> | ProductData;
     downloadZip: (urls: string[], filename: string) => Promise<void>;
 }
 
@@ -48,6 +49,9 @@ const COLORS = {
 };
 
 function PanelApp({ onClose, scrapeProductData, downloadZip }: PanelAppProps) {
+    type ViewState = 'welcome' | 'login' | 'main';
+    const [view, setView] = useState<ViewState>('welcome');
+
     const [productData, setProductData] = useState<ProductData | null>(null);
     const [selected, setSelected] = useState<Set<string>>(new Set());
     const [loading, setLoading] = useState(true);
@@ -56,18 +60,54 @@ function PanelApp({ onClose, scrapeProductData, downloadZip }: PanelAppProps) {
         productImages: true,
         reviewImages: false,
         videos: false,
+        reviewVideos: false,
         description: false,
         listingProducts: true
     });
+    const [selectionModes, setSelectionModes] = useState<Record<string, boolean>>({});
 
     useEffect(() => {
+        // Initial load
         loadData();
+
+        // Listen for automatic refresh triggers from background script and content script
+        const handleMessage = async (message: any) => {
+            // Handle AUTO_REFRESH from background (URL/page changes)
+            if (message.type === 'AUTO_REFRESH') {
+                try {
+                    // Check if this update is for the active tab effectively visible to the user
+                    const [activeTab] = await browser.tabs.query({ active: true, lastFocusedWindow: true });
+                    if (activeTab && activeTab.id === message.tabId) {
+                        // Delay depends on the reason for refresh
+                        const delay = message.reason === 'page_loaded' ? 500 : 300;
+                        setTimeout(() => {
+                            loadData();
+                        }, delay);
+                    }
+                } catch (e) {
+                    console.error('Auto-refresh check failed:', e);
+                }
+            }
+
+            // Handle CONTENT_CHANGED from content script (variant changes, dynamic content)
+            if (message.type === 'CONTENT_CHANGED') {
+                console.log('Content changed detected:', message.reason);
+                // Small delay to ensure DOM has fully updated
+                setTimeout(() => {
+                    loadData();
+                }, 400);
+            }
+        };
+
+        browser.runtime.onMessage.addListener(handleMessage);
+        return () => browser.runtime.onMessage.removeListener(handleMessage);
     }, []);
 
-    const loadData = () => {
+    const loadData = async () => {
         setLoading(true);
         try {
-            const data = scrapeProductData();
+            const result = scrapeProductData();
+            const data = result instanceof Promise ? await result : result;
             setProductData(data);
         } catch (error) {
             console.error('Failed to get data:', error);
@@ -80,6 +120,7 @@ function PanelApp({ onClose, scrapeProductData, downloadZip }: PanelAppProps) {
                 productImages: [],
                 reviewImages: [],
                 videos: [],
+                reviewVideos: [],
                 listingProducts: []
             });
         } finally {
@@ -115,7 +156,7 @@ function PanelApp({ onClose, scrapeProductData, downloadZip }: PanelAppProps) {
 
     const getAllMedia = () => {
         if (!productData) return [];
-        const media = [...productData.productImages, ...productData.reviewImages, ...productData.videos];
+        const media = [...productData.productImages, ...productData.reviewImages, ...productData.videos, ...productData.reviewVideos];
         // Include listing product images
         if (productData.pageType === 'listing' && productData.listingProducts) {
             productData.listingProducts.forEach(p => {
@@ -126,6 +167,14 @@ function PanelApp({ onClose, scrapeProductData, downloadZip }: PanelAppProps) {
         }
         return media;
     };
+
+    if (view === 'welcome') {
+        return <Welcome onGetStarted={() => setView('login')} />;
+    }
+
+    if (view === 'login') {
+        return <Login onLogin={() => setView('main')} />;
+    }
 
     const handleRefresh = () => {
         setSelected(new Set()); // Clear selections
@@ -138,6 +187,9 @@ function PanelApp({ onClose, scrapeProductData, downloadZip }: PanelAppProps) {
         setDownloading(true);
         try {
             await downloadZip(urls, `amazon-${productData?.asin || 'images'}-${Date.now()}`);
+            // Immediately reset selection and exit mode after successful download
+            setSelected(new Set());
+            setSelectionModes({});
         } finally {
             setTimeout(() => setDownloading(false), 2000);
         }
@@ -149,57 +201,73 @@ function PanelApp({ onClose, scrapeProductData, downloadZip }: PanelAppProps) {
         setDownloading(true);
         try {
             await downloadZip(all, `amazon-${productData?.asin || 'all'}-${Date.now()}`);
+            // Immediately reset selection and exit mode after successful download
+            setSelected(new Set());
+            setSelectionModes({});
         } finally {
             setTimeout(() => setDownloading(false), 2000);
         }
     };
 
-    const renderMediaGrid = (urls: string[], type: 'image' | 'video') => (
+    const handleSingleDownload = async (url: string, type: 'image' | 'video') => {
+        const timestamp = Date.now();
+        const ext = type === 'video' ? 'mp4' : 'jpg';
+        // Try to get extension from URL if possible
+        const urlExt = url.split('.').pop()?.split('?')[0];
+        const finalExt = urlExt && ['jpg', 'jpeg', 'png', 'webp', 'mp4', 'webm'].includes(urlExt) ? urlExt : ext;
+
+        const filename = `amazon-${type}-${timestamp}.${finalExt}`;
+
+        try {
+            await browser.runtime.sendMessage({
+                type: 'DOWNLOAD_SINGLE',
+                url,
+                filename
+            });
+        } catch (error) {
+            console.error('Single download failed:', error);
+        }
+    };
+
+    const renderMediaGrid = (urls: string[], type: 'image' | 'video', isSelectionActive: boolean) => (
         <div style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(3, 1fr)',
+            gridTemplateColumns: type === 'video' ? 'repeat(2, 1fr)' : 'repeat(3, 1fr)',
             gap: '10px',
             padding: '14px 16px'
         }}>
             {urls.map((url, i) => (
                 <div
                     key={url}
-                    onClick={() => toggleSelect(url)}
+                    onClick={() => type !== 'video' && isSelectionActive && toggleSelect(url)}
                     style={{
                         position: 'relative',
-                        aspectRatio: '1',
+                        aspectRatio: type === 'video' ? '16/9' : '1',
                         borderRadius: '10px',
                         overflow: 'hidden',
                         border: selected.has(url) ? `2px solid ${COLORS.accent}` : `1px solid ${COLORS.border}`,
-                        cursor: 'pointer',
-                        background: COLORS.white,
+                        cursor: type === 'video' ? 'default' : (isSelectionActive ? 'pointer' : 'default'),
+                        background: type === 'video' ? '#000' : COLORS.white,
                         transition: 'all 0.15s ease',
                         boxShadow: selected.has(url) ? `0 0 0 3px ${COLORS.accentLight}` : '0 1px 3px rgba(0,0,0,0.04)'
                     }}
+                    className="group"
                 >
                     {type === 'video' ? (
-                        <div style={{
-                            width: '100%',
-                            height: '100%',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            background: 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
-                        }}>
-                            <div style={{
-                                width: '36px',
-                                height: '36px',
-                                borderRadius: '50%',
-                                background: 'rgba(255,255,255,0.2)',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center'
-                            }}>
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="white">
-                                    <polygon points="5 3 19 12 5 21 5 3" />
-                                </svg>
-                            </div>
-                        </div>
+                        <video
+                            src={url}
+                            autoPlay
+                            muted
+                            loop
+                            playsInline
+                            controls
+                            preload="metadata"
+                            style={{
+                                width: '100%',
+                                height: '100%',
+                                objectFit: 'contain'
+                            }}
+                        />
                     ) : (
                         <img
                             src={url}
@@ -213,26 +281,78 @@ function PanelApp({ onClose, scrapeProductData, downloadZip }: PanelAppProps) {
                             }}
                         />
                     )}
-                    {/* Selection indicator */}
-                    <div style={{
-                        position: 'absolute',
-                        top: '6px',
-                        right: '6px',
-                        width: '18px',
-                        height: '18px',
-                        borderRadius: '50%',
-                        background: selected.has(url) ? COLORS.accent : 'rgba(0,0,0,0.25)',
-                        border: '2px solid white',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
-                    }}>
-                        {selected.has(url) && (
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3">
-                                <polyline points="20 6 9 17 4 12" />
-                            </svg>
-                        )}
+
+                    {/* Selection indicator - Only show if selection is active */}
+                    {isSelectionActive && (
+                        <div
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                toggleSelect(url);
+                            }}
+                            style={{
+                                position: 'absolute',
+                                top: '6px',
+                                right: '6px',
+                                width: '24px',
+                                height: '24px',
+                                borderRadius: '50%',
+                                background: selected.has(url) ? COLORS.accent : 'rgba(0,0,0,0.3)',
+                                border: '2px solid white',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+                                cursor: 'pointer',
+                                zIndex: 10
+                            }}
+                        >
+                            {selected.has(url) && (
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3">
+                                    <polyline points="20 6 9 17 4 12" />
+                                </svg>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Download Button */}
+                    <div
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            handleSingleDownload(url, type);
+                        }}
+                        style={{
+                            position: 'absolute',
+                            bottom: '6px',
+                            right: '6px',
+                            width: '28px',
+                            height: '28px',
+                            borderRadius: '50%',
+                            background: COLORS.white,
+                            border: `1px solid ${COLORS.border}`,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+                            cursor: 'pointer',
+                            zIndex: 10,
+                            opacity: 0.9,
+                            transition: 'all 0.2s ease'
+                        }}
+                        title="Download"
+                        onMouseEnter={(e) => {
+                            e.currentTarget.style.transform = 'scale(1.1)';
+                            e.currentTarget.style.opacity = '1';
+                        }}
+                        onMouseLeave={(e) => {
+                            e.currentTarget.style.transform = 'scale(1)';
+                            e.currentTarget.style.opacity = '0.9';
+                        }}
+                    >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={COLORS.text} strokeWidth="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                            <polyline points="7 10 12 15 17 10" />
+                            <line x1="12" y1="15" x2="12" y2="3" />
+                        </svg>
                     </div>
                 </div>
             ))}
@@ -252,6 +372,7 @@ function PanelApp({ onClose, scrapeProductData, downloadZip }: PanelAppProps) {
 
         const isExpanded = expandedSections[sectionKey];
         const allSelected = urls.every(url => selected.has(url));
+        const isSelectionMode = selectionModes[sectionKey] || false;
 
         return (
             <div style={{
@@ -288,7 +409,7 @@ function PanelApp({ onClose, scrapeProductData, downloadZip }: PanelAppProps) {
                             {iconPath}
                         </div>
                         <div>
-                            <span style={{ fontWeight: 600, fontSize: '14px', color: COLORS.text }}>{title}</span>
+                            <span style={{ fontWeight: 600, fontSize: '15px', color: COLORS.text }}>{title}</span>
                             <span style={{
                                 marginLeft: '8px',
                                 background: COLORS.bgSecondary,
@@ -306,6 +427,32 @@ function PanelApp({ onClose, scrapeProductData, downloadZip }: PanelAppProps) {
                         <button
                             onClick={(e) => {
                                 e.stopPropagation();
+                                setSelectionModes(prev => ({
+                                    ...prev,
+                                    [sectionKey]: !prev[sectionKey]
+                                }));
+                            }}
+                            style={{
+                                padding: '5px 12px',
+                                fontSize: '11px',
+                                fontWeight: 600,
+                                background: isSelectionMode ? COLORS.purpleLight : COLORS.bgSecondary,
+                                border: `1px solid ${isSelectionMode ? COLORS.purple : 'transparent'}`,
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                color: isSelectionMode ? COLORS.purple : COLORS.textSecondary,
+                                transition: 'all 0.15s ease'
+                            }}
+                        >
+                            Select
+                        </button>
+
+                        <button
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                if (!isSelectionMode) {
+                                    setSelectionModes(prev => ({ ...prev, [sectionKey]: true }));
+                                }
                                 selectAllInCategory(urls);
                             }}
                             style={{
@@ -340,7 +487,7 @@ function PanelApp({ onClose, scrapeProductData, downloadZip }: PanelAppProps) {
                 </div>
 
                 {/* Section Content */}
-                {isExpanded && renderMediaGrid(urls, type)}
+                {isExpanded && renderMediaGrid(urls, type, isSelectionMode)}
             </div>
         );
     };
@@ -399,22 +546,32 @@ function PanelApp({ onClose, scrapeProductData, downloadZip }: PanelAppProps) {
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'center',
-                            background: COLORS.bgSecondary,
+                            background: loading ? COLORS.accentLight : COLORS.bgSecondary,
                             border: 'none',
-                            cursor: 'pointer',
+                            cursor: loading ? 'default' : 'pointer',
                             borderRadius: '8px',
-                            color: COLORS.textSecondary,
-                            transition: 'all 0.15s ease'
+                            color: loading ? COLORS.accent : COLORS.textSecondary,
+                            transition: 'all 0.2s ease'
                         }}
                         title="Refresh"
                     >
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <svg
+                            width="16"
+                            height="16"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            style={{
+                                animation: loading ? 'spin 1s linear infinite' : 'none'
+                            }}
+                        >
                             <path d="M23 4v6h-6M1 20v-6h6" />
                             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
                         </svg>
                     </button>
                     <button
-                        onClick={onClose}
+                        onClick={() => setView('login')}
                         style={{
                             width: '34px',
                             height: '34px',
@@ -428,10 +585,12 @@ function PanelApp({ onClose, scrapeProductData, downloadZip }: PanelAppProps) {
                             color: COLORS.textSecondary,
                             transition: 'all 0.15s ease'
                         }}
-                        title="Close"
+                        title="Sign Out"
                     >
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path d="M18 6L6 18M6 6l12 12" />
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                            <polyline points="16 17 21 12 16 7" />
+                            <line x1="21" y1="12" x2="9" y2="12" />
                         </svg>
                     </button>
                 </div>
@@ -471,7 +630,7 @@ function PanelApp({ onClose, scrapeProductData, downloadZip }: PanelAppProps) {
                     </div>
                     <p style={{
                         margin: 0,
-                        fontSize: '13px',
+                        fontSize: '15px',
                         color: COLORS.text,
                         lineHeight: 1.5,
                         fontWeight: 500
@@ -571,6 +730,20 @@ function PanelApp({ onClose, scrapeProductData, downloadZip }: PanelAppProps) {
                             </svg>
                         )}
 
+                        {/* Product Videos Section */}
+                        {renderSection(
+                            'Product Videos',
+                            productData.videos.length,
+                            productData.videos,
+                            'videos',
+                            COLORS.purple,
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={COLORS.purple} strokeWidth="2">
+                                <polygon points="23 7 16 12 23 17 23 7" />
+                                <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+                            </svg>,
+                            'video'
+                        )}
+
                         {/* Review Images Section */}
                         {renderSection(
                             'Review Images',
@@ -583,16 +756,16 @@ function PanelApp({ onClose, scrapeProductData, downloadZip }: PanelAppProps) {
                             </svg>
                         )}
 
-                        {/* Videos Section */}
+                        {/* Review Videos Section */}
                         {renderSection(
-                            'Videos',
-                            productData.videos.length,
-                            productData.videos,
-                            'videos',
-                            COLORS.purple,
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={COLORS.purple} strokeWidth="2">
-                                <polygon points="23 7 16 12 23 17 23 7" />
-                                <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+                            'Review Videos',
+                            productData.reviewVideos.length,
+                            productData.reviewVideos,
+                            'reviewVideos',
+                            COLORS.blue,
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={COLORS.blue} strokeWidth="2">
+                                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                                <polygon points="10 8 16 12 10 16 10 8" />
                             </svg>,
                             'video'
                         )}
@@ -944,7 +1117,7 @@ function PanelApp({ onClose, scrapeProductData, downloadZip }: PanelAppProps) {
                         <span style={{ color: COLORS.textMuted, fontSize: '12px' }}>
                             {productData.pageType === 'listing'
                                 ? `${productData.listingProducts.length} products`
-                                : `${productData.productImages.length} images • ${productData.reviewImages.length} reviews • ${productData.videos.length} videos`
+                                : `${productData.productImages.length} images • ${productData.reviewImages.length} reviews • ${productData.videos.length + productData.reviewVideos.length} videos`
                             }
                         </span>
                     </div>

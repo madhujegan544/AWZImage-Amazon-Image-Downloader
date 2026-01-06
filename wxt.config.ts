@@ -8,7 +8,7 @@ export default defineConfig({
     plugins: [tailwind()],
   }),
   manifest: {
-    permissions: ['downloads', 'storage', 'activeTab', 'tabs', 'scripting'],
+    permissions: ['downloads', 'storage', 'activeTab', 'tabs', 'scripting', 'sidePanel'],
     host_permissions: [
       'https://*.amazon.com/*',
       'https://*.amazon.co.uk/*',
