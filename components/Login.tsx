@@ -1,20 +1,25 @@
 import { useState } from 'react';
 
 const COLORS = {
-    bg: '#fafbfc',
-    bgSecondary: '#f4f6f8',
-    bgHover: '#eef1f4',
-    border: '#e8ecf0',
-    borderLight: '#f0f3f6',
-    text: '#2d3748',
-    textSecondary: '#64748b',
-    textMuted: '#94a3b8',
-    accent: '#f97316',
-    accentLight: '#fff7ed',
-    accentDark: '#ea580c',
-    success: '#10b981',
-    error: '#ef4444',
-    white: '#ffffff'
+    bg: '#F6F7FB',
+    bgSecondary: '#EFF1F7',
+    bgHover: '#E9ECF4',
+    bgGradient: 'linear-gradient(180deg, #FFFFFF 0%, #F6F7FB 100%)',
+    bgCard: '#FFFFFF',
+    border: '#E2E4F2',
+    borderLight: '#EEF0F8',
+    text: '#2E2F38',
+    textSecondary: '#6B6F85',
+    textMuted: '#9AA0B5',
+    accent: '#7B7FF2',
+    accentLight: '#E8E9FF',
+    accentDark: '#666AD1',
+    success: '#6BCB77',
+    error: '#FF6B6B',
+    white: '#FFFFFF',
+    shadowSm: '0 2px 4px rgba(123, 127, 242, 0.04), 0 1px 2px rgba(123, 127, 242, 0.02)',
+    shadowMd: '0 4px 12px rgba(123, 127, 242, 0.06), 0 2px 4px rgba(123, 127, 242, 0.03)',
+    shadowAccent: '0 4px 16px rgba(123, 127, 242, 0.20), 0 2px 4px rgba(123, 127, 242, 0.10)'
 };
 
 interface LoginProps {
@@ -59,18 +64,19 @@ function Login({ onLogin }: LoginProps) {
             <div style={{
                 padding: '24px',
                 textAlign: 'center',
-                borderBottom: `1px solid ${COLORS.border}`,
-                background: COLORS.white
+                borderBottom: `1px solid ${COLORS.borderLight}`,
+                background: COLORS.white,
+                boxShadow: '0 1px 3px rgba(123, 127, 242, 0.05)'
             }}>
                 <div style={{
                     width: '56px',
                     height: '56px',
                     borderRadius: '14px',
-                    background: 'linear-gradient(135deg, #1e293b 0%, #334155 100%)',
+                    background: 'linear-gradient(135deg, #666AD1 0%, #7B7FF2 100%)',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+                    boxShadow: COLORS.shadowMd,
                     margin: '0 auto 16px'
                 }}>
                     <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="1.5">
@@ -84,7 +90,13 @@ function Login({ onLogin }: LoginProps) {
                     fontWeight: 700,
                     letterSpacing: '-0.3px'
                 }}>
-                    AMZ<span style={{ color: COLORS.accent }}>IMAGE</span>
+                    AMZ<span style={{
+                        background: 'linear-gradient(135deg, #7B7FF2 0%, #8E92F7 100%)',
+                        WebkitBackgroundClip: 'text',
+                        WebkitTextFillColor: 'transparent',
+                        backgroundClip: 'text',
+                        marginLeft: '1px'
+                    }}>IMAGE</span>
                 </h1>
                 <p style={{
                     margin: '6px 0 0',
@@ -177,11 +189,12 @@ function Login({ onLogin }: LoginProps) {
                     {error && (
                         <div style={{
                             padding: '10px 14px',
-                            background: '#fef2f2',
-                            border: '1px solid #fecaca',
+                            background: '#FFF5F5',
+                            border: `1px solid ${COLORS.error}20`,
                             borderRadius: '8px',
                             fontSize: '12px',
-                            color: COLORS.error
+                            color: COLORS.error,
+                            fontWeight: 500
                         }}>
                             {error}
                         </div>
@@ -201,7 +214,7 @@ function Login({ onLogin }: LoginProps) {
                             fontWeight: 600,
                             fontSize: '14px',
                             color: COLORS.white,
-                            boxShadow: '0 2px 12px rgba(249, 115, 22, 0.25)',
+                            boxShadow: COLORS.shadowAccent,
                             transition: 'all 0.2s ease',
                             display: 'flex',
                             alignItems: 'center',

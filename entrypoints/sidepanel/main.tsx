@@ -12,7 +12,7 @@ style.textContent = `
     padding: 0;
     width: 100%;
     height: 100%;
-    background: #fafbfc;
+    background: #F6F7FB;
   }
   #root {
     width: 100%;

@@ -1,14 +1,21 @@
 const COLORS = {
-    bg: '#fafbfc',
-    bgSecondary: '#f4f6f8',
-    border: '#e8ecf0',
-    text: '#2d3748',
-    textSecondary: '#64748b',
-    textMuted: '#94a3b8',
-    accent: '#f97316',
-    accentLight: '#fff7ed',
-    accentDark: '#ea580c',
-    white: '#ffffff'
+    bg: '#F6F7FB',
+    bgSecondary: '#EFF1F7',
+    bgHover: '#E9ECF4',
+    bgGradient: 'linear-gradient(180deg, #FFFFFF 0%, #F6F7FB 100%)',
+    bgCard: '#FFFFFF',
+    border: '#E2E4F2',
+    borderLight: '#EEF0F8',
+    text: '#2E2F38',
+    textSecondary: '#6B6F85',
+    textMuted: '#9AA0B5',
+    accent: '#7B7FF2',
+    accentLight: '#E8E9FF',
+    accentDark: '#666AD1',
+    white: '#FFFFFF',
+    shadowSm: '0 2px 4px rgba(123, 127, 242, 0.04), 0 1px 2px rgba(123, 127, 242, 0.02)',
+    shadowMd: '0 4px 12px rgba(123, 127, 242, 0.06), 0 2px 4px rgba(123, 127, 242, 0.03)',
+    shadowAccent: '0 4px 16px rgba(123, 127, 242, 0.20), 0 2px 4px rgba(123, 127, 242, 0.10)'
 };
 
 interface WelcomeProps {
@@ -22,7 +29,7 @@ function Welcome({ onGetStarted }: WelcomeProps) {
             flexDirection: 'column',
             height: '100%',
             width: '100%',
-            background: `linear-gradient(180deg, ${COLORS.white} 0%, ${COLORS.bg} 100%)`,
+            background: COLORS.bg,
             fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
             color: COLORS.text,
             overflow: 'hidden'
@@ -42,11 +49,11 @@ function Welcome({ onGetStarted }: WelcomeProps) {
                     width: '80px',
                     height: '80px',
                     borderRadius: '20px',
-                    background: 'linear-gradient(135deg, #1e293b 0%, #334155 100%)',
+                    background: 'linear-gradient(135deg, #666AD1 0%, #7B7FF2 100%)',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    boxShadow: '0 8px 32px rgba(0,0,0,0.15)',
+                    boxShadow: '0 8px 32px rgba(123, 127, 242, 0.25)',
                     marginBottom: '28px'
                 }}>
                     <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="1.5">
@@ -64,7 +71,13 @@ function Welcome({ onGetStarted }: WelcomeProps) {
                     color: COLORS.text,
                     marginBottom: '8px'
                 }}>
-                    AMZ<span style={{ color: COLORS.accent }}>IMAGE</span>
+                    AMZ<span style={{
+                        background: 'linear-gradient(135deg, #7B7FF2 0%, #8E92F7 100%)',
+                        WebkitBackgroundClip: 'text',
+                        WebkitTextFillColor: 'transparent',
+                        backgroundClip: 'text',
+                        marginLeft: '1px'
+                    }}>IMAGE</span>
                 </h1>
                 <p style={{
                     margin: 0,
@@ -98,7 +111,8 @@ function Welcome({ onGetStarted }: WelcomeProps) {
                             background: COLORS.white,
                             borderRadius: '12px',
                             border: `1px solid ${COLORS.border}`,
-                            textAlign: 'left'
+                            textAlign: 'left',
+                            boxShadow: COLORS.shadowSm
                         }}>
                             <div style={{
                                 width: '40px',
@@ -139,7 +153,7 @@ function Welcome({ onGetStarted }: WelcomeProps) {
                         fontWeight: 700,
                         fontSize: '15px',
                         color: COLORS.white,
-                        boxShadow: '0 4px 16px rgba(249, 115, 22, 0.3)',
+                        boxShadow: COLORS.shadowAccent,
                         transition: 'all 0.2s ease',
                         display: 'flex',
                         alignItems: 'center',
@@ -148,11 +162,11 @@ function Welcome({ onGetStarted }: WelcomeProps) {
                     }}
                     onMouseEnter={(e) => {
                         e.currentTarget.style.transform = 'translateY(-2px)';
-                        e.currentTarget.style.boxShadow = '0 6px 20px rgba(249, 115, 22, 0.4)';
+                        e.currentTarget.style.boxShadow = COLORS.shadowAccent;
                     }}
                     onMouseLeave={(e) => {
                         e.currentTarget.style.transform = 'translateY(0)';
-                        e.currentTarget.style.boxShadow = '0 4px 16px rgba(249, 115, 22, 0.3)';
+                        e.currentTarget.style.boxShadow = COLORS.shadowAccent;
                     }}
                 >
                     Get Started
