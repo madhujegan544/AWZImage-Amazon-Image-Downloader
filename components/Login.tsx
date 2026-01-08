@@ -1,304 +1,216 @@
-import { useState } from 'react';
+/**
+ * PIXORA - Login Screen
+ * User authentication (placeholder for future implementation)
+ */
 
-const COLORS = {
-    bg: '#F6F7FB',
-    bgSecondary: '#EFF1F7',
-    bgHover: '#E9ECF4',
-    bgGradient: 'linear-gradient(180deg, #FFFFFF 0%, #F6F7FB 100%)',
-    bgCard: '#FFFFFF',
-    border: '#E2E4F2',
-    borderLight: '#EEF0F8',
-    text: '#2E2F38',
-    textSecondary: '#6B6F85',
-    textMuted: '#9AA0B5',
-    accent: '#7B7FF2',
-    accentLight: '#E8E9FF',
-    accentDark: '#666AD1',
-    success: '#6BCB77',
-    error: '#FF6B6B',
-    white: '#FFFFFF',
-    shadowSm: '0 2px 4px rgba(123, 127, 242, 0.04), 0 1px 2px rgba(123, 127, 242, 0.02)',
-    shadowMd: '0 4px 12px rgba(123, 127, 242, 0.06), 0 2px 4px rgba(123, 127, 242, 0.03)',
-    shadowAccent: '0 4px 16px rgba(123, 127, 242, 0.20), 0 2px 4px rgba(123, 127, 242, 0.10)'
-};
+import './App.css';
 
 interface LoginProps {
     onLogin: () => void;
 }
 
+const COLORS = {
+    primary: '#2563EB',
+    primaryHover: '#1D4ED8',
+    primarySoft: '#EFF6FF',
+    surface: '#FFFFFF',
+    background: '#F8FAFC',
+    text: '#0F172A',
+    textSecondary: '#475569',
+    textMuted: '#94A3B8',
+    border: '#E2E8F0',
+    shadowPrimary: '0 4px 14px rgba(37, 99, 235, 0.25)',
+    shadowSm: '0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04)',
+};
+
 function Login({ onLogin }: LoginProps) {
-    const [email, setEmail] = useState('');
-    const [password, setPassword] = useState('');
-    const [isLoading, setIsLoading] = useState(false);
-    const [error, setError] = useState('');
-
-    const handleSubmit = async (e: React.FormEvent) => {
-        e.preventDefault();
-        setError('');
-        setIsLoading(true);
-
-        // Simulate login - in a real app, this would call an API
-        setTimeout(() => {
-            setIsLoading(false);
-            // For now, just proceed to main app
-            onLogin();
-        }, 800);
-    };
-
-    const handleSkip = () => {
-        onLogin();
-    };
-
     return (
         <div style={{
             display: 'flex',
             flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
             height: '100%',
             width: '100%',
-            background: COLORS.bg,
-            fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
-            color: COLORS.text,
-            overflow: 'auto'
+            background: COLORS.background,
+            fontFamily: "'Google Sans Flex', 'Google Sans', -apple-system, BlinkMacSystemFont, system-ui, sans-serif",
+            padding: '32px 24px',
+            textAlign: 'center'
         }}>
-            {/* Header */}
+            {/* Logo */}
             <div style={{
-                padding: '24px',
-                textAlign: 'center',
-                borderBottom: `1px solid ${COLORS.borderLight}`,
-                background: COLORS.white,
-                boxShadow: '0 1px 3px rgba(123, 127, 242, 0.05)'
+                width: '64px',
+                height: '64px',
+                borderRadius: '18px',
+                background: `linear-gradient(135deg, ${COLORS.primary} 0%, #3B82F6 100%)`,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                boxShadow: COLORS.shadowPrimary,
+                marginBottom: '24px'
             }}>
-                <div style={{
-                    width: '56px',
-                    height: '56px',
-                    borderRadius: '14px',
-                    background: 'linear-gradient(135deg, #666AD1 0%, #7B7FF2 100%)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    boxShadow: COLORS.shadowMd,
-                    margin: '0 auto 16px'
-                }}>
-                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="1.5">
-                        <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-                        <circle cx="12" cy="13" r="4" />
-                    </svg>
-                </div>
-                <h1 style={{
-                    margin: 0,
-                    fontSize: '22px',
-                    fontWeight: 700,
-                    letterSpacing: '-0.3px'
-                }}>
-                    AMZ<span style={{
-                        background: 'linear-gradient(135deg, #7B7FF2 0%, #8E92F7 100%)',
-                        WebkitBackgroundClip: 'text',
-                        WebkitTextFillColor: 'transparent',
-                        backgroundClip: 'text',
-                        marginLeft: '1px'
-                    }}>IMAGE</span>
-                </h1>
-                <p style={{
-                    margin: '6px 0 0',
-                    fontSize: '13px',
-                    color: COLORS.textMuted
-                }}>
-                    Sign in to continue
-                </p>
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="7 10 12 15 17 10" />
+                    <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
             </div>
 
-            {/* Form */}
-            <div style={{
-                flex: 1,
-                padding: '24px',
-                display: 'flex',
-                flexDirection: 'column'
+            {/* Header */}
+            <h2 style={{
+                fontSize: '20px',
+                fontWeight: 700,
+                color: COLORS.text,
+                marginBottom: '8px',
+                letterSpacing: '-0.3px'
             }}>
-                <form onSubmit={handleSubmit} style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '16px'
-                }}>
-                    {/* Email Input */}
-                    <div>
-                        <label style={{
-                            display: 'block',
-                            fontSize: '12px',
-                            fontWeight: 600,
-                            color: COLORS.textSecondary,
-                            marginBottom: '6px'
-                        }}>
-                            Email Address
-                        </label>
-                        <input
-                            type="email"
-                            value={email}
-                            onChange={(e) => setEmail(e.target.value)}
-                            placeholder="you@example.com"
-                            style={{
-                                width: '100%',
-                                padding: '12px 14px',
-                                fontSize: '14px',
-                                border: `1px solid ${COLORS.border}`,
-                                borderRadius: '10px',
-                                background: COLORS.white,
-                                color: COLORS.text,
-                                outline: 'none',
-                                transition: 'border-color 0.2s ease',
-                                boxSizing: 'border-box'
-                            }}
-                            onFocus={(e) => e.target.style.borderColor = COLORS.accent}
-                            onBlur={(e) => e.target.style.borderColor = COLORS.border}
-                        />
-                    </div>
+                Welcome back
+            </h2>
 
-                    {/* Password Input */}
-                    <div>
-                        <label style={{
-                            display: 'block',
-                            fontSize: '12px',
-                            fontWeight: 600,
-                            color: COLORS.textSecondary,
-                            marginBottom: '6px'
-                        }}>
-                            Password
-                        </label>
-                        <input
-                            type="password"
-                            value={password}
-                            onChange={(e) => setPassword(e.target.value)}
-                            placeholder="Enter your password"
-                            style={{
-                                width: '100%',
-                                padding: '12px 14px',
-                                fontSize: '14px',
-                                border: `1px solid ${COLORS.border}`,
-                                borderRadius: '10px',
-                                background: COLORS.white,
-                                color: COLORS.text,
-                                outline: 'none',
-                                transition: 'border-color 0.2s ease',
-                                boxSizing: 'border-box'
-                            }}
-                            onFocus={(e) => e.target.style.borderColor = COLORS.accent}
-                            onBlur={(e) => e.target.style.borderColor = COLORS.border}
-                        />
-                    </div>
+            <p style={{
+                fontSize: '13px',
+                color: COLORS.textMuted,
+                marginBottom: '32px',
+                maxWidth: '240px',
+                lineHeight: 1.5
+            }}>
+                Sign in to access all features and sync your preferences
+            </p>
 
-                    {/* Error Message */}
-                    {error && (
-                        <div style={{
-                            padding: '10px 14px',
-                            background: '#FFF5F5',
-                            border: `1px solid ${COLORS.error}20`,
-                            borderRadius: '8px',
-                            fontSize: '12px',
-                            color: COLORS.error,
-                            fontWeight: 500
-                        }}>
-                            {error}
-                        </div>
-                    )}
-
-                    {/* Submit Button */}
-                    <button
-                        type="submit"
-                        disabled={isLoading}
+            {/* Login Form Card */}
+            <div style={{
+                width: '100%',
+                maxWidth: '300px',
+                background: COLORS.surface,
+                borderRadius: '16px',
+                padding: '24px',
+                boxShadow: COLORS.shadowSm,
+                marginBottom: '20px'
+            }}>
+                {/* Email Input */}
+                <div style={{ marginBottom: '16px' }}>
+                    <label style={{
+                        display: 'block',
+                        fontSize: '12px',
+                        fontWeight: 500,
+                        color: COLORS.textSecondary,
+                        marginBottom: '6px',
+                        textAlign: 'left'
+                    }}>
+                        Email
+                    </label>
+                    <input
+                        type="email"
+                        placeholder="you@example.com"
                         style={{
                             width: '100%',
-                            padding: '14px',
-                            background: `linear-gradient(135deg, ${COLORS.accentDark} 0%, ${COLORS.accent} 100%)`,
-                            border: 'none',
+                            padding: '12px 14px',
+                            border: `1px solid ${COLORS.border}`,
                             borderRadius: '10px',
-                            cursor: isLoading ? 'not-allowed' : 'pointer',
-                            fontWeight: 600,
                             fontSize: '14px',
-                            color: COLORS.white,
-                            boxShadow: COLORS.shadowAccent,
-                            transition: 'all 0.2s ease',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            gap: '8px',
-                            marginTop: '8px',
-                            opacity: isLoading ? 0.7 : 1
+                            fontFamily: 'inherit',
+                            color: COLORS.text,
+                            background: COLORS.background,
+                            outline: 'none',
+                            transition: 'border-color 0.2s ease, box-shadow 0.2s ease'
                         }}
-                    >
-                        {isLoading ? (
-                            <>
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: 'spin 1s linear infinite' }}>
-                                    <path d="M23 4v6h-6M1 20v-6h6" />
-                                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-                                </svg>
-                                Signing in...
-                            </>
-                        ) : (
-                            <>
-                                Sign In
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                                    <line x1="5" y1="12" x2="19" y2="12" />
-                                    <polyline points="12 5 19 12 12 19" />
-                                </svg>
-                            </>
-                        )}
-                    </button>
-                </form>
-
-                {/* Divider */}
-                <div style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '16px',
-                    margin: '24px 0'
-                }}>
-                    <div style={{ flex: 1, height: '1px', background: COLORS.border }} />
-                    <span style={{ fontSize: '12px', color: COLORS.textMuted }}>or</span>
-                    <div style={{ flex: 1, height: '1px', background: COLORS.border }} />
+                        onFocus={(e) => {
+                            e.target.style.borderColor = COLORS.primary;
+                            e.target.style.boxShadow = `0 0 0 3px ${COLORS.primarySoft}`;
+                        }}
+                        onBlur={(e) => {
+                            e.target.style.borderColor = COLORS.border;
+                            e.target.style.boxShadow = 'none';
+                        }}
+                    />
                 </div>
 
-                {/* Skip Button */}
+                {/* Password Input */}
+                <div style={{ marginBottom: '24px' }}>
+                    <label style={{
+                        display: 'block',
+                        fontSize: '12px',
+                        fontWeight: 500,
+                        color: COLORS.textSecondary,
+                        marginBottom: '6px',
+                        textAlign: 'left'
+                    }}>
+                        Password
+                    </label>
+                    <input
+                        type="password"
+                        placeholder="••••••••"
+                        style={{
+                            width: '100%',
+                            padding: '12px 14px',
+                            border: `1px solid ${COLORS.border}`,
+                            borderRadius: '10px',
+                            fontSize: '14px',
+                            fontFamily: 'inherit',
+                            color: COLORS.text,
+                            background: COLORS.background,
+                            outline: 'none',
+                            transition: 'border-color 0.2s ease, box-shadow 0.2s ease'
+                        }}
+                        onFocus={(e) => {
+                            e.target.style.borderColor = COLORS.primary;
+                            e.target.style.boxShadow = `0 0 0 3px ${COLORS.primarySoft}`;
+                        }}
+                        onBlur={(e) => {
+                            e.target.style.borderColor = COLORS.border;
+                            e.target.style.boxShadow = 'none';
+                        }}
+                    />
+                </div>
+
+                {/* Sign In Button */}
                 <button
-                    onClick={handleSkip}
+                    onClick={onLogin}
                     style={{
                         width: '100%',
                         padding: '14px',
-                        background: COLORS.bgSecondary,
-                        border: `1px solid ${COLORS.border}`,
-                        borderRadius: '10px',
-                        cursor: 'pointer',
-                        fontWeight: 600,
+                        background: COLORS.primary,
+                        border: 'none',
+                        borderRadius: '12px',
                         fontSize: '14px',
-                        color: COLORS.textSecondary,
+                        fontWeight: 600,
+                        color: '#fff',
+                        cursor: 'pointer',
+                        boxShadow: COLORS.shadowPrimary,
                         transition: 'all 0.2s ease'
                     }}
-                    onMouseEnter={(e) => {
-                        e.currentTarget.style.background = COLORS.bgHover;
-                    }}
-                    onMouseLeave={(e) => {
-                        e.currentTarget.style.background = COLORS.bgSecondary;
-                    }}
                 >
-                    Continue without signing in
+                    Sign In
                 </button>
-
-                {/* Info Text */}
-                <p style={{
-                    marginTop: '20px',
-                    fontSize: '11px',
-                    color: COLORS.textMuted,
-                    textAlign: 'center',
-                    lineHeight: 1.5
-                }}>
-                    Sign in to sync your preferences and access premium features
-                </p>
             </div>
 
-            <style>{`
-                @keyframes spin {
-                    from { transform: rotate(0deg); }
-                    to { transform: rotate(360deg); }
-                }
-            `}</style>
+            {/* Skip Option */}
+            <button
+                onClick={onLogin}
+                style={{
+                    background: 'none',
+                    border: 'none',
+                    fontSize: '13px',
+                    fontWeight: 500,
+                    color: COLORS.textMuted,
+                    cursor: 'pointer',
+                    padding: '8px 16px',
+                    borderRadius: '8px',
+                    transition: 'color 0.2s ease'
+                }}
+            >
+                Continue without signing in →
+            </button>
+
+            {/* Footer */}
+            <p style={{
+                marginTop: 'auto',
+                paddingTop: '24px',
+                fontSize: '11px',
+                color: COLORS.textMuted
+            }}>
+                By continuing, you agree to our Terms of Service
+            </p>
         </div>
     );
 }

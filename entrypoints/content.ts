@@ -8,12 +8,22 @@ interface ProductItem {
     rating?: string;
 }
 
+interface VariantItem {
+    name: string;
+    asin: string;
+    image?: string;
+    selected: boolean;
+    available: boolean;
+}
+
 interface ProductData {
     pageType: 'product' | 'listing';
     asin: string;
     title: string;
     variant: string;
+    variants: VariantItem[];
     description: string;
+    activeImage: string; // Added field
     productImages: string[];
     reviewImages: string[];
     videos: string[];        // Product videos (from manufacturer/seller)
@@ -362,6 +372,51 @@ export default defineContentScript({
                 sendResponse({ success: true });
             }
 
+            if (message.type === 'SELECT_VARIANT') {
+                try {
+                    const asin = message.asin;
+                    // Try multiple selectors to find the variant on page
+                    const selectors = [
+                        `li[data-defaultasin="${asin}"]`,
+                        `li[data-asin="${asin}"]`,
+                        `div[data-asin="${asin}"]`,
+                        `span[data-asin="${asin}"] .a-button-input`
+                    ];
+
+                    let target: HTMLElement | null = null;
+                    for (const sel of selectors) {
+                        target = document.querySelector<HTMLElement>(sel);
+                        if (target) break;
+                    }
+
+                    if (target) {
+                        // If it's an input inside a label/button
+                        if (target.tagName !== 'BUTTON' && target.tagName !== 'A') {
+                            const wrapper = target.closest('li, div.a-button-toggle');
+                            if (wrapper) {
+                                // Check for nested link or button
+                                const link = wrapper.querySelector('a, button, input');
+                                if (link) (link as HTMLElement).click();
+                                else target.click();
+                            } else {
+                                target.click();
+                            }
+                        } else {
+                            target.click();
+                        }
+                        sendResponse({ success: true });
+                    } else {
+                        // Fallback: If not found in DOM, maybe reload page with new ASIN
+                        // But usually twisty is present.
+                        console.warn('Variant element not found for ASIN:', asin);
+                        sendResponse({ success: false });
+                    }
+                } catch (e) {
+                    console.error("Error selecting variant", e);
+                    sendResponse({ success: false });
+                }
+            }
+
             return false;
         });
 
@@ -480,13 +535,18 @@ export default defineContentScript({
                 const title = titleEl?.textContent?.trim() || '';
 
                 // Get price - try multiple selectors
+                // Removed generic .a-color-base.a-text-normal which was capturing titles
                 const priceEl = card.querySelector<HTMLElement>(
                     '.a-price .a-offscreen, ' +
                     '.a-price-whole, ' +
-                    '.a-color-base.a-text-normal, ' +
                     '[data-cy="price-recipe"] .a-offscreen'
                 );
-                const price = priceEl?.textContent?.trim() || '';
+                let price = priceEl?.textContent?.trim() || '';
+
+                // Validate price: must be short and contain numbers
+                if (price.length > 20 || !/[0-9]/.test(price)) {
+                    price = '';
+                }
 
                 // Get rating
                 const ratingEl = card.querySelector<HTMLElement>(
@@ -510,7 +570,85 @@ export default defineContentScript({
             });
 
             console.log(`AMZImage: Found ${products.length} products on listing page`);
+            console.log(`AMZImage: Found ${products.length} products on listing page`);
             return products;
+        }
+
+        function scrapeVariants(): VariantItem[] {
+            const variants: VariantItem[] = [];
+            // Common container for partial updates or full page
+            const container = document.querySelector('#twister_feature_div') || document.body;
+
+            // Select all variation list items
+            // Color, text, style, etc.
+            const items = container.querySelectorAll<HTMLElement>('li[data-defaultasin], li[data-asin]');
+
+            items.forEach(item => {
+                const asin = item.getAttribute('data-defaultasin') || item.getAttribute('data-asin');
+                if (!asin) return;
+
+                // Check selection
+                const isSelected = item.classList.contains('swatchSelect') ||
+                    item.querySelector('.swatchSelect') !== null ||
+                    item.classList.contains('a-active');
+
+                // Check availability
+                const isUnavailable = item.classList.contains('swatchUnavailable') ||
+                    item.classList.contains('unavailable') ||
+                    item.querySelector('.a-button-unavailable') !== null;
+
+
+                // Name extraction with sanitization
+                let name = '';
+                const img = item.querySelector('img');
+
+                // 1. Try image attributes
+                if (img) {
+                    name = img.getAttribute('alt') || img.getAttribute('title') || '';
+                }
+
+                // 2. Fallback to visible text (innerText avoids <style> content better than textContent)
+                if (!name || name.trim() === '') {
+                    // Check specific text elements first to avoid noise
+                    const textButton = item.querySelector('.a-button-text');
+                    if (textButton) {
+                        name = textButton.textContent || '';
+                    } else {
+                        name = (item as HTMLElement).innerText || item.textContent || '';
+                    }
+                }
+
+                name = name.trim();
+
+                // Sanitization: Remove "Select " prefix
+                name = name.replace(/^Select\s+/, '');
+
+                // Sanitization: Reject CSS code or garbage
+                // matches {}, !important, starts with dot (class), or looks like css declarations
+                const hasCssCode = /[{}]|!important|^\.|:\s*[a-z0-9-]+\s*;/i.test(name);
+
+                if (!name || hasCssCode) return;
+
+                // Image (for the pill dot)
+                let image = img?.src || '';
+
+                variants.push({
+                    name: name.replace(/^Select\s+/, '').trim(),
+                    asin,
+                    image,
+                    selected: !!isSelected,
+                    available: !isUnavailable
+                });
+            });
+
+            // Filter out empty names or duplicates
+            const unique = new Map();
+            variants.forEach(v => {
+                if (v.name && !unique.has(v.asin)) {
+                    unique.set(v.asin, v);
+                }
+            });
+            return Array.from(unique.values());
         }
 
         function scrapeProductData(): ProductData {
@@ -577,6 +715,10 @@ export default defineContentScript({
                     variant = variantElement.textContent?.trim() || '';
                 }
             }
+
+            // Extract all variants
+            const variants = onProductPage ? scrapeVariants() : [];
+
 
             // Extract product description (product pages only)
             let description = '';
@@ -1925,13 +2067,37 @@ export default defineContentScript({
                 console.log(`AMZImage: Found ${videos.length} product videos, ${reviewVideos.length} review videos`);
             }
 
+            // Capture active image (main displayed image)
+            let activeImage = '';
+            const landingImage = document.querySelector('#landingImage') as HTMLImageElement;
+            if (landingImage && landingImage.src) {
+                activeImage = landingImage.src;
+                // Clean URL
+                if (activeImage.startsWith('http')) {
+                    activeImage = activeImage.replace(/\._AC_[a-zA-Z0-9]+_\./, '.');
+                    activeImage = activeImage.replace(/\._[a-zA-Z]+[0-9]+_\./, '.');
+                }
+            }
+
+            // Ensure unique images and prioritize active image
+            let uniqueProductImages = [...new Set(productImages)];
+
+            if (activeImage) {
+                // Remove active image if it exists elsewhere in the list to avoid duplicates
+                uniqueProductImages = uniqueProductImages.filter(img => img !== activeImage);
+                // Add active image to the front
+                uniqueProductImages.unshift(activeImage);
+            }
+
             return {
                 pageType,
                 asin,
                 title: title.substring(0, 120) + (title.length > 120 ? '...' : ''),
                 variant,
+                variants,
                 description,
-                productImages: [...new Set(productImages)],
+                activeImage,
+                productImages: uniqueProductImages,
                 reviewImages: [...new Set(reviewImages)],
                 videos: [...new Set(videos)],
                 reviewVideos: [...new Set(reviewVideos)],

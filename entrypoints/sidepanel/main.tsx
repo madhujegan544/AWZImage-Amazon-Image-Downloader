@@ -27,6 +27,7 @@ if (!container) throw new Error('Root element not found');
 
 const root = createRoot(container);
 
+// Scrape product data from content script
 const scrapeData = async () => {
     try {
         const [tab] = await browser.tabs.query({ active: true, lastFocusedWindow: true });
@@ -41,6 +42,7 @@ const scrapeData = async () => {
     }
 };
 
+// Download ZIP of files
 const downloadZip = async (urls: string[], filename: string) => {
     try {
         const response = await browser.runtime.sendMessage({
@@ -76,12 +78,49 @@ const downloadZip = async (urls: string[], filename: string) => {
     }
 };
 
+// Show preview on the Amazon page (integrated preview overlay)
+const showPreview = async (url: string, mediaType: 'image' | 'video', allUrls: string[]) => {
+    try {
+        const [tab] = await browser.tabs.query({ active: true, lastFocusedWindow: true });
+        if (!tab?.id) throw new Error('No active tab');
+
+        await browser.tabs.sendMessage(tab.id, {
+            type: 'SHOW_PREVIEW',
+            url,
+            mediaType,
+            urls: allUrls
+        });
+    } catch (e) {
+        console.error('Preview error:', e);
+    }
+};
+
+// Select a variant on the Amazon page
+const selectVariant = async (asin: string) => {
+    try {
+        const [tab] = await browser.tabs.query({ active: true, lastFocusedWindow: true });
+        if (!tab?.id) throw new Error('No active tab');
+
+        const response = await browser.tabs.sendMessage(tab.id, {
+            type: 'SELECT_VARIANT',
+            asin
+        });
+
+        return response?.success || false;
+    } catch (e) {
+        console.error('Variant selection error:', e);
+        return false;
+    }
+};
+
 root.render(
     <StrictMode>
         <PanelApp
             onClose={() => console.log('Close requested')}
             scrapeProductData={scrapeData}
             downloadZip={downloadZip}
+            showPreview={showPreview}
+            selectVariant={selectVariant}
         />
     </StrictMode>
 );

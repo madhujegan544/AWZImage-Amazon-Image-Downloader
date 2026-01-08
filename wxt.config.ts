@@ -16,9 +16,9 @@ export default defineConfig({
       'https://*.amazon.co.jp/*',
       'https://*.amazon.in/*',
     ],
-    name: 'AMZImage - Amazon Image Downloader',
-    description: 'Download high-quality images and videos from Amazon product pages with one click.',
-    version: '1.0.0',
+    name: 'Pixora - Amazon Media Downloader',
+    description: 'Download product images, videos, and review media from Amazon instantly. One-click ZIP downloads.',
+    version: '2.0.0',
     action: {}, // Icon-only action, no popup
   },
 });
