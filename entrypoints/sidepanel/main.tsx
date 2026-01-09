@@ -28,26 +28,36 @@ if (!container) throw new Error('Root element not found');
 const root = createRoot(container);
 
 // Scrape product data from content script
-const scrapeData = async () => {
+const scrapeData = async (triggerScroll: boolean = false) => {
     try {
         const [tab] = await browser.tabs.query({ active: true, lastFocusedWindow: true });
         if (!tab?.id) throw new Error('No active tab');
 
-        const response = await browser.tabs.sendMessage(tab.id, { type: 'GET_FULL_DATA' });
+        const response = await browser.tabs.sendMessage(tab.id, {
+            type: 'GET_FULL_DATA',
+            triggerScroll
+        });
         if (!response) throw new Error('No data received');
         return response;
-    } catch (e) {
-        console.error('Data scraping error:', e);
+    } catch (e: any) {
+        // Don't log expected errors when polling (tab closed, refreshing, etc.)
+        const msg = e?.message || '';
+        const isExpected = msg.includes('No active tab') ||
+            msg.includes('Could not establish connection') ||
+            msg.includes('Receiving end does not exist');
+        if (!isExpected) {
+            console.error('Data scraping error:', e);
+        }
         throw e;
     }
 };
 
 // Download ZIP of files
-const downloadZip = async (urls: string[], filename: string) => {
+const downloadZip = async (items: (string | { url: string; filename: string })[], filename: string) => {
     try {
         const response = await browser.runtime.sendMessage({
             type: 'DOWNLOAD_ZIP',
-            urls,
+            urls: items,
             filename
         });
 

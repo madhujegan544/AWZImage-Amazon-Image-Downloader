@@ -133,34 +133,44 @@ export default defineBackground(() => {
 });
 
 // Create ZIP and return base64 data (no blob URL creation here)
-async function createZipData(urls: string[], zipName: string): Promise<{ success: boolean; base64?: string; filename?: string; error?: string }> {
+async function createZipData(items: (string | { url: string; filename: string })[], zipName: string): Promise<{ success: boolean; base64?: string; filename?: string; error?: string }> {
   const zip = new JSZip();
-  const folder = zip.folder('images');
+  // Default folder if only strings are passed
+  const defaultFolder = zip.folder('images');
 
   let downloadedCount = 0;
-  const fetchPromises = urls.map(async (url, index) => {
+  const fetchPromises = items.map(async (item, index) => {
     try {
+      const url = typeof item === 'string' ? item : item.url;
       const response = await fetch(url, { mode: 'cors' });
       if (!response.ok) throw new Error(`Failed to fetch ${url}`);
       const blob = await response.blob();
 
-      // Determine file extension
-      let extension = 'jpg';
-      const urlParts = url.split('.');
-      if (urlParts.length > 1) {
-        const ext = urlParts.pop()?.split('?')[0]?.toLowerCase();
-        if (ext && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'webm'].includes(ext)) {
-          extension = ext;
+      // Determine file name and path
+      let fileName = '';
+      if (typeof item === 'object' && item.filename) {
+        fileName = item.filename;
+        // Use root zip for full paths
+        zip.file(fileName, blob);
+      } else {
+        // Fallback logic for simple strings
+        // Determine file extension
+        let extension = 'jpg';
+        const urlParts = url.split('.');
+        if (urlParts.length > 1) {
+          const ext = urlParts.pop()?.split('?')[0]?.toLowerCase();
+          if (ext && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'webm'].includes(ext)) {
+            extension = ext;
+          }
         }
+        const isVideo = ['mp4', 'webm'].includes(extension);
+        fileName = isVideo ? `video-${index + 1}.${extension}` : `image-${index + 1}.${extension}`;
+        defaultFolder?.file(fileName, blob);
       }
 
-      // Name based on type
-      const isVideo = ['mp4', 'webm'].includes(extension);
-      const fileName = isVideo ? `video-${index + 1}.${extension}` : `image-${index + 1}.${extension}`;
-      folder?.file(fileName, blob);
       downloadedCount++;
     } catch (e) {
-      console.error(`Error fetching ${url}:`, e);
+      console.error(`Error fetching ${typeof item === 'string' ? item : item.url}:`, e);
     }
   });
 

@@ -16,6 +16,7 @@ interface ProductVariant {
     asin: string;
     name: string;
     image?: string;
+    images?: string[]; // Added: full gallery
     available: boolean;
     selected: boolean;
 }
@@ -33,6 +34,7 @@ interface ProductData {
     title: string;
     variant?: string;
     productImages: string[];
+    variantImages?: Record<string, string[]>;
     reviewImages: string[];
     productVideos?: string[];
     reviewVideos?: string[];
@@ -40,6 +42,8 @@ interface ProductData {
     variants: ProductVariant[];
     listingProducts: ListingProduct[];
     pageType: 'product' | 'listing';
+    activeImage?: string;
+    variantImagesByAsin?: Record<string, string[]>;
 }
 
 interface MediaItem {
@@ -51,9 +55,9 @@ interface MediaItem {
 
 interface PanelAppProps {
     onClose?: () => void;
-    scrapeProductData: () => Promise<ProductData | null>;
-    downloadZip: (urls: string[], filename: string) => Promise<void>;
-    showPreview?: (url: string, mediaType: 'image' | 'video', allUrls: string[]) => Promise<void>;
+    scrapeProductData: (triggerScroll?: boolean) => Promise<ProductData | null>;
+    downloadZip: (items: (string | { url: string; filename: string })[], filename: string) => Promise<void>;
+    showPreview?: (url: string, mediaType: 'image' | 'video', allUrls: string[]) => void;
     selectVariant?: (asin: string) => Promise<boolean>;
 }
 
@@ -107,7 +111,35 @@ const getMediaItems = (data: ProductData | null): MediaItem[] => {
 
     const items: MediaItem[] = [];
 
-    (data.productImages || []).forEach(url => {
+    // Determine which product images to show
+    let displayImages = data.productImages || [];
+
+    // SMART OVERRIDE: If a variant is selected, try to use its specific image set
+    if (data.variants) {
+        const selectedVariant = data.variants.find(v => v.selected);
+        if (selectedVariant) {
+            // PRIORITY 1: Try exact match by ASIN (Gold Standard)
+            if (data.variantImagesByAsin && selectedVariant.asin && data.variantImagesByAsin[selectedVariant.asin]) {
+                displayImages = data.variantImagesByAsin[selectedVariant.asin];
+            }
+            // PRIORITY 2: Try exact match by Name
+            else if (data.variantImages && selectedVariant.name && data.variantImages[selectedVariant.name]) {
+                displayImages = data.variantImages[selectedVariant.name];
+            }
+            // PRIORITY 3: Fallback loose matching by Name
+            else if (data.variantImages && selectedVariant.name) {
+                const cleanName = selectedVariant.name.replace(/^Select\s+/, '').trim();
+                const matchingKey = Object.keys(data.variantImages).find(k =>
+                    k === cleanName || k.includes(cleanName) || cleanName.includes(k)
+                );
+                if (matchingKey) {
+                    displayImages = data.variantImages[matchingKey];
+                }
+            }
+        }
+    }
+
+    displayImages.forEach(url => {
         items.push({ url, type: 'image', source: 'product', category: 'productImage' });
     });
 
@@ -139,6 +171,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     const [error, setError] = useState<string | null>(null);
     const [downloading, setDownloading] = useState(false);
     const [downloadSuccess, setDownloadSuccess] = useState(false);
+    const [previewUrl, setPreviewUrl] = useState<string | null>(null); // Added for preview
 
     // Selection State
     const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
@@ -151,6 +184,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('productImages');
     const [showAllItems, setShowAllItems] = useState(false);
     const [selectingVariant, setSelectingVariant] = useState(false);
+    const [variantStartIndex, setVariantStartIndex] = useState(0);
+    const [selectedVariantAsin, setSelectedVariantAsin] = useState<string | null>(null);
 
     // Derived state
     const allMediaItems = useMemo(() => getMediaItems(productData), [productData]);
@@ -161,7 +196,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     const filteredMediaItems = useMemo(() => {
         if (categoryFilter === 'all') return allMediaItems;
         if (categoryFilter === 'productImages') return allMediaItems.filter(i => i.category === 'productImage');
-        if (categoryFilter === 'reviewImages') return allMediaItems.filter(i => i.category === 'reviewImage');
+        if (categoryFilter === 'reviewImages') return allMediaItems.filter(i => i.category === 'reviewImage' || i.category === 'reviewVideo');
         if (categoryFilter === 'videos') return allMediaItems.filter(i => i.category === 'productVideo' || i.category === 'reviewVideo');
         return allMediaItems;
     }, [allMediaItems, categoryFilter]);
@@ -176,6 +211,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         all: allMediaItems.length,
         productImages: allMediaItems.filter(i => i.category === 'productImage').length,
         reviewImages: allMediaItems.filter(i => i.category === 'reviewImage').length,
+        reviewVideos: allMediaItems.filter(i => i.category === 'reviewVideo').length,
         videos: allMediaItems.filter(i => i.category === 'productVideo' || i.category === 'reviewVideo').length,
     }), [allMediaItems]);
 
@@ -201,28 +237,87 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     // ============================================
     // Data Loading
     // ============================================
-    const loadData = useCallback(async () => {
+    const loadData = useCallback(async (triggerScroll: boolean = false) => {
         setLoading(true);
         setError(null);
-        setShowAllItems(false);
         try {
-            const data = await scrapeProductData();
+            const data = await scrapeProductData(triggerScroll);
             if (data) {
                 setProductData(data);
+                if (data.activeImage) {
+                    setPreviewUrl(data.activeImage);
+                }
             } else {
-                setError('No data found on this page.');
+                setError('No product data found on this page');
             }
         } catch (err) {
-            console.error('Failed to load data:', err);
-            setError('Could not connect to the page. Make sure you are on an Amazon product page.');
+            setError('Failed to load product data');
+            console.error(err);
         } finally {
             setLoading(false);
         }
     }, [scrapeProductData]);
 
     useEffect(() => {
-        loadData();
+        // Initial load with scrolling
+        loadData(true);
     }, [loadData]);
+
+    // Fast auto-refresh to detect product changes (every 1.5 seconds)
+    // Shows loader when navigating to a new product
+    useEffect(() => {
+        // Don't poll if downloading or switching variants
+        if (downloading || selectingVariant) {
+            return;
+        }
+
+        // Store reference to current ASIN for change detection
+        const currentAsin = productData?.asin;
+
+        const fastPollInterval = setInterval(async () => {
+            try {
+                // Poll WITHOUT triggering scroll
+                const newData = await scrapeProductData(false);
+                if (newData) {
+                    // Detect if product changed (different ASIN or page type)
+                    const productChanged = currentAsin && (
+                        newData.asin !== currentAsin ||
+                        newData.pageType !== productData?.pageType
+                    );
+
+                    if (productChanged) {
+                        // Product changed - show loader and reset state
+                        setLoading(true);
+                        setSelectedItems(new Set());
+                        setIsSelectionMode(false);
+                        setShowAllItems(false);
+                        setCategoryFilter('productImages');
+                        setSelectedVariantAsin(null);
+
+                        // Brief delay to show loading state
+                        setTimeout(() => {
+                            setProductData(newData);
+                            setLoading(false);
+                        }, 300);
+                    } else {
+                        // Same product - silently update data (for variant changes, etc.)
+                        setProductData(newData);
+                    }
+                }
+            } catch (err: any) {
+                // Ignore expected errors during polling (tab closed, refreshing, etc.)
+                const msg = err?.message || '';
+                const isExpected = msg.includes('No active tab') ||
+                    msg.includes('Could not establish connection') ||
+                    msg.includes('Receiving end does not exist');
+                if (!isExpected) {
+                    console.error('Auto-refresh failed:', err);
+                }
+            }
+        }, 1500); // Fast polling every 1.5 seconds
+
+        return () => clearInterval(fastPollInterval);
+    }, [downloading, selectingVariant, productData?.asin, productData?.pageType, scrapeProductData]);
 
     // Close dropdown when clicking outside
     useEffect(() => {
@@ -249,6 +344,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     const handleVariantSelect = async (asin: string, variantName: string) => {
         if (!selectVariant || selectingVariant) return;
 
+        setSelectedVariantAsin(asin); // Set for immediate persistent highlighting
         setSelectingVariant(true);
         setVariantDropdownOpen(false);
 
@@ -266,7 +362,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     await new Promise(resolve => setTimeout(resolve, 800));
 
                     try {
-                        const newData = await scrapeProductData();
+                        const newData = await scrapeProductData(false); // Poll WITHOUT triggering scroll
                         if (newData) {
                             // Check if variant actually changed
                             const newVariant = newData.variants?.find(v => v.selected);
@@ -306,18 +402,58 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     const downloadAll = async () => {
         if (!productData) return;
 
-        const urls = isProductPage
-            ? filteredMediaItems.map(item => item.url)
-            : filteredListingProducts.map(p => p.image);
+        const categoryLabel = categoryFilter === 'all' ? 'all' : categoryFilter;
 
-        if (urls.length === 0) return;
+        let items: (string | { url: string; filename: string })[] = [];
+
+        // If downloading product images (or all) and we have variant info, structure it
+        if (isProductPage && productData.variantImages && (categoryFilter === 'all' || categoryFilter === 'productImages')) {
+            Object.entries(productData.variantImages).forEach(([vName, vUrls]) => {
+                const safeName = vName.replace(/[^a-zA-Z0-9_-]/g, '_');
+                vUrls.forEach((url, i) => {
+                    let ext = 'jpg';
+                    if (url.includes('.png')) ext = 'png';
+                    if (url.includes('.webp')) ext = 'webp';
+                    items.push({
+                        url,
+                        filename: `Variant_${safeName}/image_${i + 1}.${ext}`
+                    });
+                });
+            });
+
+            // Also add items that are NOT in variantImages (e.g. Review images if filter is all)
+            if (categoryFilter === 'all') {
+                const reviewItems = filteredMediaItems.filter(i => i.category.includes('review'));
+                reviewItems.forEach((item, i) => {
+                    let ext = 'jpg';
+                    if (item.type === 'video') ext = 'mp4';
+                    // Simple extension detection
+                    const parts = item.url.split('.');
+                    if (parts.length > 1) {
+                        const e = parts[parts.length - 1].split('?')[0];
+                        if (['jpg', 'png', 'webp', 'mp4', 'webm'].includes(e)) ext = e;
+                    }
+
+                    items.push({
+                        url: item.url,
+                        filename: `Reviews/${item.type}_${i + 1}.${ext}`
+                    });
+                });
+            }
+        } else {
+            // Fallback: Use flat list from filteredItems
+            items = isProductPage
+                ? filteredMediaItems.map(item => item.url)
+                : filteredListingProducts.map(p => p.image);
+        }
+
+        if (items.length === 0) return;
 
         setDownloading(true);
         setDownloadSuccess(false);
         try {
-            const categoryLabel = categoryFilter === 'all' ? 'all' : categoryFilter;
             const filename = `pixora-${productData.asin || 'media'}-${categoryLabel}-${Date.now()}`;
-            await downloadZip(urls, filename);
+            await downloadZip(items, filename);
             setDownloadSuccess(true);
             setTimeout(() => setDownloadSuccess(false), 3000);
         } catch (err) {
@@ -410,6 +546,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         setActiveSearchTerm('');
         setCategoryFilter('productImages');
         setShowAllItems(false);
+        setSelectedVariantAsin(null);
         loadData();
     };
 
@@ -517,9 +654,9 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             overflowX: 'auto'
         }}>
             {[
-                { key: 'productImages' as CategoryFilter, label: 'Product', count: categoryCounts.productImages },
-                { key: 'reviewImages' as CategoryFilter, label: 'Reviews', count: categoryCounts.reviewImages },
+                { key: 'productImages' as CategoryFilter, label: 'Product Images', count: categoryCounts.productImages },
                 { key: 'videos' as CategoryFilter, label: 'Videos', count: categoryCounts.videos },
+                { key: 'reviewImages' as CategoryFilter, label: 'Reviews', count: categoryCounts.reviewImages + categoryCounts.reviewVideos },
             ].map(tab => (
                 <button
                     key={tab.key}
@@ -531,9 +668,9 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                         gap: '6px',
                         padding: '8px 12px',
                         borderRadius: '8px',
-                        border: 'none',
-                        background: categoryFilter === tab.key ? COLORS.primary : COLORS.background,
-                        color: categoryFilter === tab.key ? '#fff' : COLORS.textSecondary,
+                        border: categoryFilter === tab.key ? `1.5px solid ${COLORS.primary}` : '1.5px solid transparent',
+                        background: categoryFilter === tab.key ? COLORS.primarySoft : COLORS.background,
+                        color: categoryFilter === tab.key ? COLORS.primary : COLORS.textSecondary,
                         fontSize: '12px',
                         fontWeight: 600,
                         cursor: tab.count === 0 ? 'not-allowed' : 'pointer',
@@ -544,7 +681,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 >
                     {tab.label}
                     <span style={{
-                        background: categoryFilter === tab.key ? 'rgba(255,255,255,0.2)' : COLORS.border,
+                        background: categoryFilter === tab.key ? COLORS.primary : COLORS.border,
+                        color: categoryFilter === tab.key ? '#fff' : COLORS.textMuted,
                         padding: '2px 6px',
                         borderRadius: '4px',
                         fontSize: '10px'
@@ -556,225 +694,213 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         </div>
     );
 
-    // Variant Dropdown
-    const renderVariantDropdown = () => {
-        if (availableVariants.length === 0) return null;
+    // Variant List (Grouped Cards)
+    const renderVariantList = () => {
+        // Show ALL variants (including unavailable ones for browsing)
+        const allVariants = productData?.variants || [];
+        if (allVariants.length === 0) return null;
 
         return (
-            <div style={{
-                background: selectedVariantData ? COLORS.primarySoft : COLORS.surface,
-                borderRadius: '12px',
-                marginBottom: '12px',
-                boxShadow: COLORS.shadowSm,
-                overflow: 'visible',
-                position: 'relative',
-                border: selectedVariantData ? `2px solid ${COLORS.primary}` : 'none'
-            }}>
-                {/* Dropdown Trigger */}
-                <div
-                    onClick={(e) => { e.stopPropagation(); setVariantDropdownOpen(!variantDropdownOpen); }}
-                    style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        padding: '14px',
-                        cursor: selectingVariant ? 'wait' : 'pointer',
-                        opacity: selectingVariant ? 0.7 : 1
-                    }}
-                >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                        {selectedVariantData?.image ? (
-                            <div style={{
-                                width: '48px',
-                                height: '48px',
-                                borderRadius: '10px',
-                                background: `url(${selectedVariantData.image}) center/cover`,
-                                border: `2px solid ${COLORS.primary}`,
-                                boxShadow: COLORS.shadowSm
-                            }} />
-                        ) : (
-                            <div style={{
-                                width: '48px',
-                                height: '48px',
-                                borderRadius: '10px',
-                                background: COLORS.background,
-                                border: `1px solid ${COLORS.border}`,
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center'
-                            }}>
-                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={COLORS.textMuted} strokeWidth="1.5">
-                                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                                    <circle cx="8.5" cy="8.5" r="1.5" />
-                                    <polyline points="21 15 16 10 5 21" />
-                                </svg>
-                            </div>
-                        )}
-                        <div>
-                            <p style={{
-                                fontSize: '10px',
-                                color: selectingVariant ? COLORS.warning : COLORS.primary,
-                                fontWeight: 600,
-                                marginBottom: '3px',
-                                textTransform: 'uppercase',
-                                letterSpacing: '0.5px'
-                            }}>
-                                {selectingVariant ? '⏳ Switching...' : '✓ Selected Variant'}
-                            </p>
-                            <p style={{
-                                fontSize: '16px',
-                                fontWeight: 700,
-                                color: COLORS.text,
-                                lineHeight: 1.2
-                            }}>
-                                {selectedVariantData?.name || 'Choose a variant'}
-                            </p>
-                        </div>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <span style={{
-                            fontSize: '11px',
-                            color: COLORS.primary,
-                            background: COLORS.surface,
-                            padding: '5px 10px',
-                            borderRadius: '6px',
-                            fontWeight: 600
-                        }}>
-                            {availableVariants.length} options
-                        </span>
-                        <svg
-                            width="18"
-                            height="18"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke={COLORS.primary}
-                            strokeWidth="2.5"
-                            style={{
-                                transform: variantDropdownOpen ? 'rotate(180deg)' : 'rotate(0)',
-                                transition: 'transform 0.2s ease'
-                            }}
-                        >
-                            <polyline points="6 9 12 15 18 9" />
-                        </svg>
-                    </div>
+            <div style={{ marginBottom: '16px' }}>
+                {/* Section Header */}
+                <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    marginBottom: '10px'
+                }}>
+                    <span style={{
+                        fontSize: '11px',
+                        fontWeight: 700,
+                        color: COLORS.textMuted,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.5px'
+                    }}>
+                        Product Variants ({allVariants.length})
+                    </span>
                 </div>
 
-                {/* Dropdown Menu */}
-                {variantDropdownOpen && (
-                    <div style={{
-                        position: 'absolute',
-                        top: '100%',
-                        left: 0,
-                        right: 0,
-                        background: COLORS.surface,
-                        borderRadius: '12px',
-                        boxShadow: COLORS.shadowLg,
-                        zIndex: 100,
-                        marginTop: '4px',
-                        maxHeight: '280px',
-                        overflowY: 'auto',
-                        border: `1px solid ${COLORS.border}`
-                    }}>
-                        {/* Download All Variants Option */}
-                        <button
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                downloadAllVariants();
-                            }}
-                            style={{
-                                width: '100%',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '10px',
-                                padding: '12px 14px',
-                                border: 'none',
-                                borderBottom: `1px solid ${COLORS.border}`,
-                                background: COLORS.primarySoft,
-                                cursor: 'pointer',
-                                textAlign: 'left'
-                            }}
-                        >
-                            <div style={{
-                                width: '32px',
-                                height: '32px',
-                                borderRadius: '8px',
-                                background: COLORS.primary,
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center'
-                            }}>
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2">
-                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                                    <polyline points="7 10 12 15 17 10" />
-                                    <line x1="12" y1="15" x2="12" y2="3" />
-                                </svg>
-                            </div>
-                            <div>
-                                <p style={{ fontSize: '13px', fontWeight: 600, color: COLORS.primary }}>
-                                    Download All Variants
-                                </p>
-                                <p style={{ fontSize: '11px', color: COLORS.textMuted }}>
-                                    Get images from all {availableVariants.length} variants
-                                </p>
-                            </div>
-                        </button>
+                {/* Variant Cards */}
+                <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
+                    gap: '10px'
+                }}>
+                    {allVariants.map((variant, index) => {
+                        const isCurrent = selectedVariantAsin ? variant.asin === selectedVariantAsin : variant.selected;
+                        const isUnavailable = !variant.available;
 
-                        {/* Variant Options */}
-                        {availableVariants.map(variant => (
+                        // DEBUG: Check images count
+                        if (index === 0) {
+                            console.log('PanelApp DEBUG: Variant[0] images:', variant.images?.length, variant.images);
+                        }
+
+                        // Get thumbnail - try variant image, then variantImagesByAsin, then default
+                        let thumbnail = variant.image || '';
+                        if (!thumbnail && productData?.variantImagesByAsin?.[variant.asin]?.[0]) {
+                            thumbnail = productData.variantImagesByAsin[variant.asin][0];
+                        }
+
+                        return (
                             <div
                                 key={variant.asin}
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    if (!variant.selected) {
+                                onClick={() => {
+                                    if (!isCurrent && !selectingVariant && !isUnavailable) {
                                         handleVariantSelect(variant.asin, variant.name);
                                     }
                                 }}
                                 style={{
                                     display: 'flex',
-                                    alignItems: 'center',
-                                    gap: '10px',
-                                    padding: '10px 14px',
-                                    cursor: variant.selected ? 'default' : 'pointer',
-                                    background: variant.selected ? COLORS.primarySoft : 'transparent',
-                                    borderLeft: variant.selected ? `3px solid ${COLORS.primary}` : '3px solid transparent',
-                                    transition: 'background 0.2s ease'
+                                    flexDirection: 'column',
+                                    gap: '8px',
+                                    padding: '12px',
+                                    borderRadius: '10px',
+                                    background: isCurrent ? COLORS.primarySoft : COLORS.surface,
+                                    border: `1px solid ${isCurrent ? COLORS.primary : COLORS.border}`,
+                                    cursor: isUnavailable ? 'not-allowed' : selectingVariant ? 'wait' : isCurrent ? 'default' : 'pointer',
+                                    // Removed opacity reduction for unavailable items
+                                    transition: 'all 0.2s ease'
                                 }}
+                                className={!isCurrent && !isUnavailable ? 'variant-option-hover' : ''}
                             >
-                                {variant.image ? (
+                                {/* Info */}
+                                <div style={{ width: '100%' }}>
+                                    {/* ASIN with Current indicator */}
                                     <div style={{
-                                        width: '32px',
-                                        height: '32px',
-                                        borderRadius: '6px',
-                                        background: `url(${variant.image}) center/cover`,
-                                        border: `1px solid ${COLORS.border}`
-                                    }} />
-                                ) : (
+                                        fontSize: '11px',
+                                        fontWeight: 600,
+                                        color: isCurrent ? COLORS.primary : COLORS.textMuted,
+                                        marginBottom: '4px',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'space-between'
+                                    }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                            <span>{variant.asin}</span>
+
+                                        </div>
+                                        {/* Unavailable badge removed */}
+                                    </div>
+
+                                    {/* Variant Name */}
                                     <div style={{
-                                        width: '32px',
-                                        height: '32px',
-                                        borderRadius: '6px',
-                                        background: COLORS.background,
-                                        border: `1px solid ${COLORS.border}`
-                                    }} />
-                                )}
-                                <div style={{ flex: 1 }}>
-                                    <p style={{
-                                        fontSize: '12px',
-                                        fontWeight: variant.selected ? 600 : 500,
-                                        color: variant.selected ? COLORS.primary : COLORS.text
+                                        fontSize: '13px',
+                                        fontWeight: 600,
+                                        color: COLORS.text,
+                                        lineHeight: '1.3',
+                                        marginBottom: '8px',
+                                        display: '-webkit-box',
+                                        WebkitLineClamp: 2,
+                                        WebkitBoxOrient: 'vertical',
+                                        overflow: 'hidden',
+                                        height: '34px'
                                     }}>
                                         {variant.name}
-                                    </p>
+                                    </div>
                                 </div>
-                                {variant.selected && (
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={COLORS.primary} strokeWidth="2.5">
-                                        <polyline points="20 6 9 17 4 12" />
-                                    </svg>
-                                )}
+
+                                {/* Gallery Preview (up to 2 images + counter) */}
+                                <div style={{ position: 'relative', marginTop: 'auto', width: '100%' }}>
+                                    {(variant.images && variant.images.length > 1) ? (
+                                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '4px' }}>
+                                            {variant.images.slice(0, 2).map((img, idx) => (
+                                                <div key={idx} style={{
+                                                    aspectRatio: '1',
+                                                    borderRadius: '6px',
+                                                    background: `url(${img}) center/contain no-repeat`,
+                                                    backgroundColor: '#fff',
+                                                    border: `1px solid ${COLORS.border}`,
+                                                }} />
+                                            ))}
+                                            {/* Counter or 3rd image */}
+                                            {variant.images.length > 2 && (
+                                                <div style={{
+                                                    aspectRatio: '1',
+                                                    borderRadius: '6px',
+                                                    background: COLORS.backgroundSecondary,
+                                                    border: `1px solid ${COLORS.border}`,
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center',
+                                                    fontSize: '11px',
+                                                    fontWeight: 700,
+                                                    color: COLORS.textMuted
+                                                }}>
+                                                    +{variant.images.length - 2}
+                                                </div>
+                                            )}
+                                        </div>
+                                    ) : thumbnail ? (
+                                        <div style={{
+                                            width: '100%',
+                                            height: '100px',
+                                            borderRadius: '8px',
+                                            background: `url(${thumbnail}) center/contain no-repeat`,
+                                            backgroundColor: '#fff',
+                                            border: `1px solid ${COLORS.border}`,
+                                        }} />
+                                    ) : (
+                                        <div style={{
+                                            width: '100%',
+                                            height: '100px',
+                                            borderRadius: '8px',
+                                            background: COLORS.backgroundSecondary,
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                        }}>
+                                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={COLORS.textMuted} strokeWidth="1.5">
+                                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                                                <circle cx="8.5" cy="8.5" r="1.5" />
+                                                <polyline points="21 15 16 10 5 21" />
+                                            </svg>
+                                        </div>
+                                    )}
+
+                                    {/* Download Button Overlay */}
+                                    {thumbnail && (
+                                        <button
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                if (variant.images && variant.images.length > 0) {
+                                                    const filename = `pixora-${productData?.asin || 'product'}-${variant.name.replace(/[^a-zA-Z0-9]/g, '_')}-${Date.now()}`;
+                                                    downloadZip(variant.images, filename);
+                                                } else {
+                                                    downloadSingle(thumbnail);
+                                                }
+                                            }}
+                                            className="variant-download-btn"
+                                            style={{
+                                                position: 'absolute',
+                                                bottom: '6px',
+                                                right: '6px',
+                                                width: '24px',
+                                                height: '24px',
+                                                borderRadius: '6px',
+                                                background: '#fff',
+                                                border: `1px solid ${COLORS.border}`,
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'center',
+                                                cursor: 'pointer',
+                                                boxShadow: COLORS.shadowSm,
+                                                color: COLORS.text,
+                                                transition: 'all 0.2s ease'
+                                            }}
+                                            title="Download Image"
+                                        >
+                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                                <polyline points="7 10 12 15 17 10" />
+                                                <line x1="12" y1="15" x2="12" y2="3" />
+                                            </svg>
+                                        </button>
+                                    )}
+                                </div>
                             </div>
-                        ))}
-                    </div>
-                )}
+                        );
+                    })}
+                </div>
             </div>
         );
     };
@@ -853,28 +979,29 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     )}
                 </div>
 
-                {/* Selection Checkbox */}
+                {/* Selection Checkbox - always visible */}
                 <div
                     onClick={(e) => toggleSelection(item.url, e)}
                     style={{
                         position: 'absolute',
                         top: '4px',
                         right: '4px',
-                        width: '18px',
-                        height: '18px',
-                        borderRadius: '5px',
-                        background: isSelected ? COLORS.primary : 'rgba(255,255,255,0.9)',
-                        border: isSelected ? 'none' : `1.5px solid ${COLORS.border}`,
+                        width: '20px',
+                        height: '20px',
+                        borderRadius: '6px',
+                        background: isSelected ? COLORS.primary : 'rgba(255,255,255,0.95)',
+                        border: isSelected ? 'none' : `2px solid ${COLORS.border}`,
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        boxShadow: COLORS.shadowSm,
+                        boxShadow: COLORS.shadowMd,
                         transition: 'all 0.15s ease',
-                        cursor: 'pointer'
+                        cursor: 'pointer',
+                        zIndex: 10
                     }}
                 >
                     {isSelected && (
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3">
                             <polyline points="20 6 9 17 4 12" />
                         </svg>
                     )}
@@ -933,7 +1060,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             <polyline points="7 10 12 15 17 10" />
                             <line x1="12" y1="15" x2="12" y2="3" />
                         </svg>
-                        Save
+                        Download
                     </button>
                 </div>
             </div>
@@ -966,6 +1093,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                         }
                     }}
                     style={{ aspectRatio: '1', background: COLORS.backgroundSecondary, position: 'relative' }}
+                    className="listing-image"
                 >
                     <img
                         src={product.image}
@@ -975,6 +1103,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                         onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                     />
 
+                    {/* Selection Checkbox */}
                     <div
                         onClick={(e) => toggleSelection(product.image, e)}
                         style={{
@@ -990,7 +1119,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             alignItems: 'center',
                             justifyContent: 'center',
                             boxShadow: COLORS.shadowSm,
-                            cursor: 'pointer'
+                            cursor: 'pointer',
+                            zIndex: 10
                         }}
                     >
                         {isSelected && (
@@ -998,6 +1128,62 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 <polyline points="20 6 9 17 4 12" />
                             </svg>
                         )}
+                    </div>
+
+                    {/* Hover Overlay with Preview & Download */}
+                    <div
+                        className="listing-hover-overlay"
+                        style={{
+                            position: 'absolute',
+                            inset: 0,
+                            background: 'linear-gradient(to top, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0.2) 50%, transparent 100%)',
+                            opacity: 0,
+                            transition: 'opacity 0.2s ease',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            alignItems: 'center',
+                            justifyContent: 'flex-end',
+                            padding: '8px',
+                            gap: '6px'
+                        }}
+                    >
+                        {/* Preview hint */}
+                        <span style={{
+                            fontSize: '9px',
+                            color: 'rgba(255,255,255,0.8)',
+                            fontWeight: 500
+                        }}>
+                            Click to preview
+                        </span>
+
+                        {/* Download button */}
+                        <button
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                downloadSingle(product.image);
+                            }}
+                            style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                                padding: '6px 10px',
+                                background: '#fff',
+                                borderRadius: '6px',
+                                fontSize: '10px',
+                                fontWeight: 600,
+                                color: COLORS.text,
+                                boxShadow: COLORS.shadowMd,
+                                cursor: 'pointer',
+                                border: 'none'
+                            }}
+                        >
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                <polyline points="7 10 12 15 17 10" />
+                                <line x1="12" y1="15" x2="12" y2="3" />
+                            </svg>
+                            Download
+                        </button>
                     </div>
                 </div>
 
@@ -1082,24 +1268,6 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    {!loading && hasContent && (
-                        <span style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '4px',
-                            padding: '5px 8px',
-                            background: COLORS.primarySoft,
-                            borderRadius: '6px',
-                            fontSize: '11px',
-                            fontWeight: 600,
-                            color: COLORS.primary
-                        }}>
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                            </svg>
-                            {displayCount}
-                        </span>
-                    )}
                     <button
                         onClick={handleRefresh}
                         disabled={loading}
@@ -1139,7 +1307,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                         </div>
                         <input
                             type="text"
-                            placeholder="Search..."
+                            placeholder="Search by product name or ASIN..."
                             value={searchTerm}
                             onChange={(e) => setSearchTerm(e.target.value)}
                             onKeyDown={(e) => e.key === 'Enter' && setActiveSearchTerm(searchTerm)}
@@ -1176,117 +1344,12 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             {/* CATEGORY TABS (Product Pages) */}
             {!loading && isProductPage && hasContent && renderCategoryTabs()}
 
-            {/* CONTENT */}
-            <main style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden' }}>
-                {loading ? renderLoading() : !hasContent ? renderEmpty() : (
-                    <div style={{ padding: '14px' }}>
-                        {/* Variant Dropdown (Product Pages) */}
-                        {isProductPage && availableVariants.length > 0 && renderVariantDropdown()}
-
-                        {/* Selection Banner */}
-                        {isSelectionMode && (
-                            <div style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'space-between',
-                                padding: '8px 12px',
-                                background: COLORS.primarySoft,
-                                borderRadius: '8px',
-                                marginBottom: '12px'
-                            }}>
-                                <span style={{ fontSize: '12px', fontWeight: 600, color: COLORS.primary }}>
-                                    {selectedCount} selected
-                                </span>
-                                <button
-                                    onClick={clearSelection}
-                                    style={{
-                                        fontSize: '11px', fontWeight: 500, color: COLORS.primary,
-                                        padding: '4px 8px', borderRadius: '4px', background: 'transparent',
-                                        border: 'none', cursor: 'pointer'
-                                    }}
-                                >
-                                    Clear
-                                </button>
-                            </div>
-                        )}
-
-                        {/* Media Grid (Product Pages) */}
-                        {isProductPage && (
-                            <>
-                                <div style={{
-                                    display: 'grid',
-                                    gridTemplateColumns: 'repeat(3, 1fr)',
-                                    gap: '8px'
-                                }}>
-                                    {displayedItems.map((item, index) => renderMediaItem(item, index))}
-                                </div>
-
-                                {/* Show More Button */}
-                                {hasMoreItems && !showAllItems && (
-                                    <button
-                                        onClick={() => setShowAllItems(true)}
-                                        style={{
-                                            width: '100%',
-                                            marginTop: '12px',
-                                            padding: '12px',
-                                            background: COLORS.surface,
-                                            border: `1px solid ${COLORS.border}`,
-                                            borderRadius: '10px',
-                                            fontSize: '13px',
-                                            fontWeight: 600,
-                                            color: COLORS.primary,
-                                            cursor: 'pointer',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            justifyContent: 'center',
-                                            gap: '6px'
-                                        }}
-                                    >
-                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                            <polyline points="6 9 12 15 18 9" />
-                                        </svg>
-                                        Show {hiddenCount} More
-                                    </button>
-                                )}
-
-                                {/* Show Less Button */}
-                                {showAllItems && hasMoreItems && (
-                                    <button
-                                        onClick={() => setShowAllItems(false)}
-                                        style={{
-                                            width: '100%',
-                                            marginTop: '12px',
-                                            padding: '10px',
-                                            background: 'transparent',
-                                            border: 'none',
-                                            fontSize: '12px',
-                                            fontWeight: 500,
-                                            color: COLORS.textMuted,
-                                            cursor: 'pointer'
-                                        }}
-                                    >
-                                        Show Less
-                                    </button>
-                                )}
-                            </>
-                        )}
-
-                        {/* Listing Grid */}
-                        {isListingPage && (
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px' }}>
-                                {filteredListingProducts.map((product, index) => renderListingProduct(product, index))}
-                            </div>
-                        )}
-                    </div>
-                )}
-            </main>
-
-            {/* FOOTER */}
+            {/* TOP DOWNLOAD BAR - Prominent position */}
             {!loading && hasContent && (
-                <footer style={{
-                    padding: '12px 14px',
+                <div style={{
+                    padding: '10px 14px',
                     background: COLORS.surface,
-                    borderTop: `1px solid ${COLORS.borderLight}`,
+                    borderBottom: `1px solid ${COLORS.borderLight}`,
                     flexShrink: 0
                 }}>
                     {isSelectionMode ? (
@@ -1294,8 +1357,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             <button
                                 onClick={clearSelection}
                                 style={{
-                                    flex: 1, padding: '12px', background: COLORS.background,
-                                    border: `1px solid ${COLORS.border}`, borderRadius: '10px',
+                                    flex: 1, padding: '10px', background: COLORS.background,
+                                    border: `1px solid ${COLORS.border}`, borderRadius: '8px',
                                     fontSize: '13px', fontWeight: 600, color: COLORS.text, cursor: 'pointer'
                                 }}
                             >
@@ -1305,9 +1368,9 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 onClick={downloadSelected}
                                 disabled={selectedCount === 0 || downloading}
                                 style={{
-                                    flex: 2, padding: '12px',
+                                    flex: 2, padding: '10px',
                                     background: downloadSuccess ? COLORS.success : COLORS.primary,
-                                    border: 'none', borderRadius: '10px',
+                                    border: 'none', borderRadius: '8px',
                                     fontSize: '13px', fontWeight: 600, color: '#fff',
                                     display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
                                     boxShadow: COLORS.shadowPrimary,
@@ -1320,54 +1383,256 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                         <path d="M23 4v6h-6M1 20v-6h6" />
                                         <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
                                     </svg>
-                                ) : downloadSuccess ? '✓ Done' : `Download ${selectedCount}`}
+                                ) : downloadSuccess ? '✓ Done' : (
+                                    <>
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                            <polyline points="7 10 12 15 17 10" />
+                                            <line x1="12" y1="15" x2="12" y2="3" />
+                                        </svg>
+                                        {selectedCount === displayCount ? 'Download All' : `Download ${selectedCount} images`}
+                                    </>
+                                )}
                             </button>
                         </div>
                     ) : (
-                        <button
-                            onClick={downloadAll}
-                            disabled={downloading}
-                            style={{
-                                width: '100%', padding: '14px',
-                                background: downloadSuccess ? COLORS.success : COLORS.primary,
-                                border: 'none', borderRadius: '12px',
-                                fontSize: '14px', fontWeight: 600, color: '#fff',
-                                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
-                                boxShadow: COLORS.shadowPrimary,
-                                cursor: downloading ? 'not-allowed' : 'pointer'
-                            }}
-                        >
-                            {downloading ? (
-                                <>
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: 'spin 1s linear infinite' }}>
-                                        <path d="M23 4v6h-6M1 20v-6h6" />
-                                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-                                    </svg>
-                                    Downloading...
-                                </>
-                            ) : downloadSuccess ? (
-                                <>✓ Downloaded!</>
-                            ) : (
-                                <>
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                                        <polyline points="7 10 12 15 17 10" />
-                                        <line x1="12" y1="15" x2="12" y2="3" />
-                                    </svg>
-                                    Download {categoryFilter === 'productImages' ? 'Product' : categoryFilter === 'reviewImages' ? 'Reviews' : 'Videos'} · {displayCount}
-                                </>
-                            )}
-                        </button>
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                            {/* Select All Button Removed */}
+
+                            <button
+                                onClick={downloadAll}
+                                disabled={downloading}
+                                style={{
+                                    flex: 1, padding: '10px',
+                                    background: downloadSuccess ? COLORS.success : COLORS.primary,
+                                    border: 'none', borderRadius: '10px',
+                                    fontSize: '14px', fontWeight: 600, color: '#fff',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
+                                    boxShadow: COLORS.shadowPrimary,
+                                    cursor: downloading ? 'not-allowed' : 'pointer'
+                                }}
+                            >
+                                {downloading ? (
+                                    <>
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: 'spin 1s linear infinite' }}>
+                                            <path d="M23 4v6h-6M1 20v-6h6" />
+                                            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                                        </svg>
+                                        Downloading...
+                                    </>
+                                ) : downloadSuccess ? (
+                                    <>✓ Downloaded!</>
+                                ) : (
+                                    <>
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                            <polyline points="7 10 12 15 17 10" />
+                                            <line x1="12" y1="15" x2="12" y2="3" />
+                                        </svg>
+                                        Download All
+                                    </>
+                                )}
+                            </button>
+                        </div>
                     )}
-                </footer>
+                </div>
             )}
+
+            {/* CONTENT */}
+            <main style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden' }}>
+                {/* Content Header (Variants etc) */}
+                {!loading && hasContent && isProductPage && categoryFilter === 'productImages' && availableVariants.length > 0 && (
+                    <div style={{ padding: '14px 14px 0 14px' }}>
+                        {renderVariantList()}
+                    </div>
+                )}
+
+                {loading ? renderLoading() : !hasContent ? renderEmpty() : (
+                    <div style={{ padding: '14px' }}>
+                        {/* Media Grid (Product Pages) */}
+                        {isProductPage && (
+                            <div style={{
+                                transition: 'opacity 0.4s ease-in-out',
+                                opacity: selectingVariant ? 0.5 : 1,
+                                filter: selectingVariant ? 'grayscale(0.5)' : 'none'
+                            }}>
+                                {/* Reviews Section - Show segregated Images and Videos */}
+                                {categoryFilter === 'reviewImages' ? (
+                                    <>
+                                        {/* Review Images Sub-section */}
+                                        {categoryCounts.reviewImages > 0 && (
+                                            <div style={{ marginBottom: '20px' }}>
+                                                <div style={{
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    gap: '8px',
+                                                    marginBottom: '10px'
+                                                }}>
+                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={COLORS.primary} strokeWidth="2">
+                                                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                                                        <circle cx="8.5" cy="8.5" r="1.5" />
+                                                        <polyline points="21 15 16 10 5 21" />
+                                                    </svg>
+                                                    <span style={{
+                                                        fontSize: '13px',
+                                                        fontWeight: 600,
+                                                        color: COLORS.text
+                                                    }}>
+                                                        Review Images
+                                                    </span>
+                                                    <span style={{
+                                                        fontSize: '11px',
+                                                        fontWeight: 600,
+                                                        color: COLORS.primary,
+                                                        background: COLORS.primarySoft,
+                                                        padding: '2px 8px',
+                                                        borderRadius: '4px'
+                                                    }}>
+                                                        {categoryCounts.reviewImages}
+                                                    </span>
+                                                </div>
+                                                <div style={{
+                                                    display: 'grid',
+                                                    gridTemplateColumns: 'repeat(3, 1fr)',
+                                                    gap: '8px'
+                                                }}>
+                                                    {allMediaItems
+                                                        .filter(i => i.category === 'reviewImage')
+                                                        .map((item, index) => renderMediaItem(item, index))}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Review Videos Sub-section */}
+                                        {categoryCounts.reviewVideos > 0 && (
+                                            <div>
+                                                <div style={{
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    gap: '8px',
+                                                    marginBottom: '10px'
+                                                }}>
+                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={COLORS.warning} strokeWidth="2">
+                                                        <polygon points="23 7 16 12 23 17 23 7" />
+                                                        <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+                                                    </svg>
+                                                    <span style={{
+                                                        fontSize: '13px',
+                                                        fontWeight: 600,
+                                                        color: COLORS.text
+                                                    }}>
+                                                        Review Videos
+                                                    </span>
+                                                    <span style={{
+                                                        fontSize: '11px',
+                                                        fontWeight: 600,
+                                                        color: COLORS.warning,
+                                                        background: COLORS.warningSoft,
+                                                        padding: '2px 8px',
+                                                        borderRadius: '4px'
+                                                    }}>
+                                                        {categoryCounts.reviewVideos}
+                                                    </span>
+                                                </div>
+                                                <div style={{
+                                                    display: 'grid',
+                                                    gridTemplateColumns: 'repeat(3, 1fr)',
+                                                    gap: '8px'
+                                                }}>
+                                                    {allMediaItems
+                                                        .filter(i => i.category === 'reviewVideo')
+                                                        .map((item, index) => renderMediaItem(item, index))}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </>
+                                ) : (
+                                    /* Normal Grid for Product Images and Videos tabs */
+                                    <>
+                                        <div style={{
+                                            display: 'grid',
+                                            gridTemplateColumns: 'repeat(3, 1fr)',
+                                            gap: '8px'
+                                        }}>
+                                            {displayedItems.map((item, index) => renderMediaItem(item, index))}
+                                        </div>
+
+                                        {/* Show More Button */}
+                                        {hasMoreItems && !showAllItems && (
+                                            <button
+                                                onClick={() => setShowAllItems(true)}
+                                                style={{
+                                                    width: '100%',
+                                                    marginTop: '12px',
+                                                    padding: '12px',
+                                                    background: COLORS.surface,
+                                                    border: `1px solid ${COLORS.border}`,
+                                                    borderRadius: '10px',
+                                                    fontSize: '13px',
+                                                    fontWeight: 600,
+                                                    color: COLORS.primary,
+                                                    cursor: 'pointer',
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center',
+                                                    gap: '6px'
+                                                }}
+                                            >
+                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                                    <polyline points="6 9 12 15 18 9" />
+                                                </svg>
+                                                Show {hiddenCount} More
+                                            </button>
+                                        )}
+
+                                        {/* Show Less Button */}
+                                        {showAllItems && hasMoreItems && (
+                                            <button
+                                                onClick={() => setShowAllItems(false)}
+                                                style={{
+                                                    width: '100%',
+                                                    marginTop: '12px',
+                                                    padding: '10px',
+                                                    background: 'transparent',
+                                                    border: 'none',
+                                                    fontSize: '12px',
+                                                    fontWeight: 500,
+                                                    color: COLORS.textMuted,
+                                                    cursor: 'pointer'
+                                                }}
+                                            >
+                                                Show Less
+                                            </button>
+                                        )}
+                                    </>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Listing Grid */}
+                        {isListingPage && (
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px' }}>
+                                {filteredListingProducts.map((product, index) => renderListingProduct(product, index))}
+                            </div>
+                        )}
+                    </div>
+                )}
+            </main>
 
             {/* GLOBAL STYLES */}
             <style>{`
                 .media-item:hover .media-hover-overlay { opacity: 1 !important; }
                 .media-item:hover { transform: scale(1.02); }
+                .listing-image:hover .listing-hover-overlay { opacity: 1 !important; }
                 .listing-product:hover { transform: scale(1.02); box-shadow: ${COLORS.shadowMd}; }
+                .variant-option-hover:hover { background: ${COLORS.primarySoft} !important; }
+                .variant-download-btn:hover { background: ${COLORS.primary} !important; color: #fff !important; transform: translateY(-1px); }
+                .variant-scroll::-webkit-scrollbar { height: 4px; }
+                .variant-scroll::-webkit-scrollbar-track { background: transparent; }
+                .variant-scroll::-webkit-scrollbar-thumb { background: ${COLORS.border}; border-radius: 4px; }
                 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+                @keyframes fadeInSlide { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+                @keyframes progressSlide { 0% { transform: translateX(-100%); } 100% { transform: translateX(350%); } }
             `}</style>
         </div>
     );

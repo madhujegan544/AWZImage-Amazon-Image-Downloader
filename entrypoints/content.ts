@@ -1,19 +1,13 @@
 
 
+import { scrapeVariants, VariantItem } from '../utils/variantScraper';
+
 interface ProductItem {
     asin: string;
     title: string;
     image: string;
     price?: string;
     rating?: string;
-}
-
-interface VariantItem {
-    name: string;
-    asin: string;
-    image?: string;
-    selected: boolean;
-    available: boolean;
 }
 
 interface ProductData {
@@ -25,6 +19,8 @@ interface ProductData {
     description: string;
     activeImage: string; // Added field
     productImages: string[];
+    variantImages?: Record<string, string[]>; // Images for each variant (Name -> Images)
+    variantImagesByAsin?: Record<string, string[]>; // Images for each variant (ASIN -> Images)
     reviewImages: string[];
     videos: string[];        // Product videos (from manufacturer/seller)
     reviewVideos: string[];  // Customer review videos
@@ -226,7 +222,8 @@ export default defineContentScript({
         // Get current ASIN from URL
         function getCurrentAsin(): string {
             const match = window.location.pathname.match(/\/dp\/([A-Z0-9]{10})/i) ||
-                window.location.pathname.match(/\/gp\/product\/([A-Z0-9]{10})/i);
+                window.location.pathname.match(/\/gp\/product\/([A-Z0-9]{10})/i) ||
+                window.location.pathname.match(/\/product-reviews\/([A-Z0-9]{10})/i);
             return match ? match[1] : '';
         }
 
@@ -234,14 +231,9 @@ export default defineContentScript({
         function setupVariantObserver() {
             // Elements to watch for changes
             const observeTargets = [
-                '#imageBlock',           // Main image area
-                '#altImages',            // Thumbnail carousel
-                '#twister',              // Variant selector (color, size, etc.)
-                '#landingImage',         // Main product image
-                '#imgTagWrapperId',      // Image wrapper
-                '#variation_color_name', // Color variant selector
-                '#variation_size_name',  // Size variant selector  
-                '#variation_style_name', // Style variant selector
+                '#imageBlock', '#altImages', '#twister', '#landingImage',
+                '#customer-reviews', '#customerReviews', '#cm_cr-review_list', '.cr-media-gallery',
+                '[data-hook="review-image-tile"]', '.review-video-container'
             ];
 
             const observer = new MutationObserver((mutations) => {
@@ -340,31 +332,26 @@ export default defineContentScript({
         // Listen for messages from background script and sidepanel
         browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             if (message.type === 'GET_FULL_DATA') {
-                try {
-                    const data = scrapeProductData();
-                    sendResponse(data);
-                } catch (error) {
-                    console.error('Error scraping data:', error);
+                scrapeProductData(message.triggerScroll).then(sendResponse).catch(e => {
+                    console.error('Async scrape error:', e);
                     sendResponse(null);
-                }
+                });
+                return true;
             }
 
             if (message.type === 'GET_IMAGES') {
-                try {
-                    const data = scrapeProductData();
+                scrapeProductData().then(data => {
                     const allImages = [...data.productImages, ...data.reviewImages];
                     if (data.pageType === 'listing') {
                         data.listingProducts.forEach(p => {
-                            if (p.image && !allImages.includes(p.image)) {
-                                allImages.push(p.image);
-                            }
+                            if (p.image && !allImages.includes(p.image)) allImages.push(p.image);
                         });
                     }
                     sendResponse({ images: allImages });
-                } catch (error) {
-                    console.error('Error scraping images:', error);
+                }).catch(e => {
                     sendResponse({ images: [] });
-                }
+                });
+                return true;
             }
 
             if (message.type === 'SHOW_PREVIEW') {
@@ -424,7 +411,7 @@ export default defineContentScript({
 
         function isProductPage(): boolean {
             const url = window.location.pathname;
-            return url.includes('/dp/') || url.includes('/gp/product/');
+            return url.includes('/dp/') || url.includes('/gp/product/') || url.includes('/product-reviews/');
         }
 
         function isListingPage(): boolean {
@@ -574,85 +561,316 @@ export default defineContentScript({
             return products;
         }
 
-        function scrapeVariants(): VariantItem[] {
-            const variants: VariantItem[] = [];
-            // Common container for partial updates or full page
-            const container = document.querySelector('#twister_feature_div') || document.body;
+        // scrapeVariants is now imported from utils/variantScraper.ts
 
-            // Select all variation list items
-            // Color, text, style, etc.
-            const items = container.querySelectorAll<HTMLElement>('li[data-defaultasin], li[data-asin]');
+        // =========================================================================
+        // MEDIA NORMALIZATION & VALIDATION HELPERS
+        // =========================================================================
 
-            items.forEach(item => {
-                const asin = item.getAttribute('data-defaultasin') || item.getAttribute('data-asin');
-                if (!asin) return;
-
-                // Check selection
-                const isSelected = item.classList.contains('swatchSelect') ||
-                    item.querySelector('.swatchSelect') !== null ||
-                    item.classList.contains('a-active');
-
-                // Check availability
-                const isUnavailable = item.classList.contains('swatchUnavailable') ||
-                    item.classList.contains('unavailable') ||
-                    item.querySelector('.a-button-unavailable') !== null;
-
-
-                // Name extraction with sanitization
-                let name = '';
-                const img = item.querySelector('img');
-
-                // 1. Try image attributes
-                if (img) {
-                    name = img.getAttribute('alt') || img.getAttribute('title') || '';
-                }
-
-                // 2. Fallback to visible text (innerText avoids <style> content better than textContent)
-                if (!name || name.trim() === '') {
-                    // Check specific text elements first to avoid noise
-                    const textButton = item.querySelector('.a-button-text');
-                    if (textButton) {
-                        name = textButton.textContent || '';
-                    } else {
-                        name = (item as HTMLElement).innerText || item.textContent || '';
-                    }
-                }
-
-                name = name.trim();
-
-                // Sanitization: Remove "Select " prefix
-                name = name.replace(/^Select\s+/, '');
-
-                // Sanitization: Reject CSS code or garbage
-                // matches {}, !important, starts with dot (class), or looks like css declarations
-                const hasCssCode = /[{}]|!important|^\.|:\s*[a-z0-9-]+\s*;/i.test(name);
-
-                if (!name || hasCssCode) return;
-
-                // Image (for the pill dot)
-                let image = img?.src || '';
-
-                variants.push({
-                    name: name.replace(/^Select\s+/, '').trim(),
-                    asin,
-                    image,
-                    selected: !!isSelected,
-                    available: !isUnavailable
-                });
-            });
-
-            // Filter out empty names or duplicates
-            const unique = new Map();
-            variants.forEach(v => {
-                if (v.name && !unique.has(v.asin)) {
-                    unique.set(v.asin, v);
-                }
-            });
-            return Array.from(unique.values());
+        function getImageBase(url: string): string {
+            const match = url.match(/images\/I\/([A-Za-z0-9\-_+%]+)/);
+            return match ? match[1] : url;
         }
 
-        function scrapeProductData(): ProductData {
+        function toHighRes(url: string): string {
+            if (!url) return '';
+            return url
+                .replace(/\._[A-Z]{2}_[A-Za-z0-9,_]+_\./, '.')
+                .replace(/\._AC_.*_\./, '.')
+                .replace(/\._S[A-Z0-9]+_\./, '.')
+                .replace(/\._U[A-Z0-9]+_\./, '.')
+                .replace(/\._CR[0-9,]+_\./, '.')
+                .replace(/\._X[A-Z0-9]+_\./, '.');
+        }
+
+        function isValidImage(url: string | null | undefined): boolean {
+            if (!url || !url.startsWith('http')) return false;
+            const lowerUrl = url.toLowerCase();
+            if (lowerUrl.includes('.svg')) return false;
+
+            const unwantedKeywords = [
+                'sprite', 'transparent', 'pixel', 'placeholder', 'loader', 'loading',
+                'icon', 'logo', 'button', 'overlay', 'zoom', 'magnifier', 'plus', 'minus',
+                'caret', 'arrow', 'chevron', 'star', 'rating', 'badge', 'play-button',
+                'reviews-image-gallery-loading', 'nav-sprite', 'details-gallery-view',
+                'x-locale', 'maximize', 'minimize', 'remove', 'close', 'delete',
+                'spin', '360_icon', '360-icon', 'view_full', 'cursor', 'selector',
+                'play-icon', 'video-icon', 'images/g/', 'common',
+                'zoom-in', 'zoom-out', 'flyout', 'ui-element'
+            ];
+
+            if (unwantedKeywords.some(kw => lowerUrl.includes(kw))) return false;
+            if (lowerUrl.includes('profile') || lowerUrl.includes('avatar')) return false;
+            return true;
+        }
+
+        function isCustomerReviewImage(url: string, contextElement?: Element | null): boolean {
+            const lowerUrl = url.toLowerCase();
+            const customerUrlPatterns = [
+                'customer-images', 'customerimages', 'customer_images', 'customer-image',
+                'customerimage', 'customer_image', 'usermedia', 'user-media', 'user_media',
+                'user-content', 'usercontent', 'user_content', 'ugc', 'review-image',
+                'reviewimage', 'review_image', 'cm_cr', 'crwidget', 'cr-media'
+            ];
+
+            if (customerUrlPatterns.some(pattern => lowerUrl.includes(pattern))) return true;
+
+            if (contextElement) {
+                const reviewContainers = [
+                    '#customer-reviews', '#customerReviews', '#cm_cr-review_list',
+                    '[data-hook*="review"]', '.review', '.cr-widget', '.cr-media-gallery',
+                    '[data-hook="cr-media-gallery"]', '.review-image-container',
+                    '[data-hook="review-image-tile"]', '[id*="review-image-gallery"]',
+                    '[class*="review-media-gallery"]', '.cr-media-gallery'
+                ];
+                if (reviewContainers.some(selector => contextElement.closest(selector))) return true;
+            }
+
+            if (lowerUrl.includes('/images/i/') && (lowerUrl.includes('._cr') || lowerUrl.includes('cr_'))) return true;
+            return false;
+        }
+
+        function isPromotionalContent(content: string, url: string): boolean {
+            const lowerContent = content.toLowerCase();
+            const lowerUrl = url.toLowerCase();
+            const patterns = [
+                'similar brands', 'similarbrand', 'competitor', 'compare-with', 'other-brands',
+                'related-brand', 'sponsored', 'advertisement', 'adplaceholder', 'ad-holder',
+                'sp_detail', 'brand-video', 'brand-story', 'brand-snapshot', 'from-the-brand',
+                'explore-brand', 'aplus-module', 'enhanced-brand', 'third-party', 'external-video',
+                'similarities', 'comparison-widget', 'also-viewed', 'frequently-bought',
+                'shoppable-video', 'influencer', 'amazon-influence', 'curated', 'bought-together'
+            ];
+            return patterns.some(p => lowerContent.includes(p) || lowerUrl.includes(p));
+        }
+
+        function isOfficialProductVideo(content: string, url: string): boolean {
+            if (isPromotionalContent(content, url)) return false;
+            const lowerUrl = url.toLowerCase();
+            const exclude = ['brand', 'sponsor', 'advertisement', 'promo', 'similar', 'compare', 'thirdparty', 'external'];
+            if (exclude.some(p => lowerUrl.includes(p))) return false;
+
+            const official = [
+                'product-video', 'product_video', 'main-video', 'gallery-video', 'detail-video',
+                'dp-video', 'landing-video', 'primary-video', 'image-block', 'alt-images',
+                'iv-main', 'color-images', 'vse-video'
+            ];
+
+            const urlIndex = content.indexOf(url);
+            if (urlIndex >= 0) {
+                const context = content.substring(Math.max(0, urlIndex - 600), Math.min(content.length, urlIndex + 600)).toLowerCase();
+                if (official.some(p => context.includes(p))) return true;
+                const suspicious = ['brand', 'story', 'similar', 'compare', 'related', 'also', 'other', 'sponsor', 'ad'];
+                if (suspicious.some(p => context.includes(p))) return false;
+            }
+            return lowerUrl.includes('product-video') || lowerUrl.includes('official-video');
+        }
+
+        function getVideoId(url: string): string {
+            try {
+                return new URL(url).pathname;
+            } catch (e) {
+                return url.split('?')[0];
+            }
+        }
+
+        function isReviewVideoContext(content: string, url: string): boolean {
+            if (isPromotionalContent(content, url)) return false;
+            const lowerContent = content.toLowerCase();
+            const reviewPatterns = [
+                'customer-review', 'customerreview', 'review-video', 'ugc', 'usermedia',
+                'cr-media', 'crwidget', 'review media', 'customer images', 'perfect',
+                'shade', 'quality', 'texture', 'scent', 'size', 'purchase', 'reviewer'
+            ];
+            if (reviewPatterns.some(p => lowerContent.includes(p))) {
+                const productPatterns = ['product-video', 'image-block', 'alt-images', 'color-images', 'iv-main'];
+                if (!productPatterns.some(p => lowerContent.includes(p))) return true;
+            }
+            return false;
+        }
+
+        // =========================================================================
+
+        /**
+         * Triggers lazy loading by scrolling through the entire page and specific sections.
+         */
+        async function triggerReviewMediaLoad() {
+            // 1. Scroll main page in increments to trigger listing/lazy images
+            const scrollStep = 800;
+            const totalHeight = document.documentElement.scrollHeight;
+            for (let current = 0; current < totalHeight; current += scrollStep) {
+                window.scrollTo(0, current);
+                // Smaller delay for faster page scan
+                if (current % 2400 === 0) await new Promise(r => setTimeout(r, 100));
+            }
+            window.scrollTo(0, 0); // Reset
+
+            // 2. Focused scrolling for review sections
+            const reviewElements = [
+                '#customer-reviews',
+                '#reviews-medley-footer',
+                '#cm_cr-review_list',
+                '[data-hook="review-image-tile"]',
+                '.cr-media-gallery-popover-trigger',
+                '#altImages',
+                '#imageBlock'
+            ];
+
+            for (const selector of reviewElements) {
+                const el = document.querySelector(selector);
+                if (el) {
+                    el.scrollIntoView({ block: 'center' });
+                    await new Promise(r => setTimeout(r, 200));
+                }
+            }
+
+            // Scroll through image tiles and thumbnails to trigger high-res loads
+            const tiles = document.querySelectorAll('[data-hook="review-image-tile"], #altImages img');
+            for (let i = 0; i < Math.min(tiles.length, 20); i++) {
+                tiles[i].scrollIntoView({ block: 'nearest' });
+            }
+        }
+
+        async function fetchAllReviewMedia(asin: string, limit: number = 8): Promise<{ images: string[], videos: string[] }> {
+            const allImages: string[] = [];
+            const allVideos: string[] = [];
+            const seenImages = new Set<string>();
+            const seenVideos = new Set<string>();
+
+            for (let page = 1; page <= limit; page++) {
+                try {
+                    const url = `https://${window.location.hostname}/product-reviews/${asin}/?reviewerType=all_reviews&mediaType=media_reviews_only&pageNumber=${page}`;
+                    const response = await fetch(url);
+                    if (!response.ok) break;
+                    const html = await response.text();
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(html, 'text/html');
+
+                    const tiles = doc.querySelectorAll([
+                        '.review-image-tile img',
+                        '.review-image-thumbnail img',
+                        '[data-hook="review-image-tile"] img',
+                        '.cr-media-card img',
+                        '.cr-media-thumbnail img',
+                        '.a-carousel-card img'
+                    ].join(', '));
+
+                    if (tiles.length === 0 && page === 1) {
+                        // If no tiles on page 1, maybe it's a different review layout
+                        // Check for common review images in the body
+                        const bodyImgs = doc.querySelectorAll('.review-image img, .review-data img');
+                        bodyImgs.forEach(img => {
+                            const src = (img as HTMLImageElement).src || img.getAttribute('data-src');
+                            if (src && isValidImage(src)) {
+                                const hi = toHighRes(src);
+                                const b = getImageBase(hi);
+                                if (!seenImages.has(b)) {
+                                    seenImages.add(b);
+                                    allImages.push(hi);
+                                }
+                            }
+                        });
+                    }
+
+                    tiles.forEach(img => {
+                        const src = (img as HTMLImageElement).src || img.getAttribute('data-src');
+                        if (src && src.startsWith('http') && !src.includes('avatar') && !src.includes('sprite')) {
+                            const hi = toHighRes(src);
+                            const b = getImageBase(hi);
+                            if (!seenImages.has(b)) {
+                                seenImages.add(b);
+                                allImages.push(hi);
+                            }
+                        }
+                    });
+
+                    if (tiles.length === 0 && page > 1) break;
+
+                    // Parse carousel and other JSON attributes in the fetched doc
+                    const jsonEls = doc.querySelectorAll('[data-a-carousel-options], [data-a-modal-state], [data-a-video-data]');
+                    jsonEls.forEach(el => {
+                        const content = el.getAttribute('data-a-carousel-options') ||
+                            el.getAttribute('data-a-modal-state') ||
+                            el.getAttribute('data-a-video-data') || '';
+
+                        // Scan for videos
+                        const vMatch = content.match(/https?:\/\/[^\"\'\s,\]]+\.(mp4|m3u8|mpd|webm)[^\"\'\s,\]]*/gi);
+                        if (vMatch) {
+                            vMatch.forEach(vUrl => {
+                                const clean = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '');
+                                const vid = clean.split('?')[0];
+                                if (!seenVideos.has(vid)) {
+                                    seenVideos.add(vid);
+                                    allVideos.push(clean);
+                                }
+                            });
+                        }
+
+                        // Scan for images
+                        const iMatch = content.match(/https?:\/\/[^\"\'\s,\]]+\.(jpg|jpeg|png|webp)[^\"\'\s,\]]*/gi);
+                        if (iMatch) {
+                            iMatch.forEach(iUrl => {
+                                if (iUrl.includes('/images/I/') && !iUrl.includes('avatar') && !iUrl.includes('sprite')) {
+                                    const hi = toHighRes(iUrl.replace(/\\u002F/g, '/').replace(/\\/g, ''));
+                                    const b = getImageBase(hi);
+                                    if (!seenImages.has(b) && isValidImage(hi)) {
+                                        seenImages.add(b);
+                                        allImages.push(hi);
+                                    }
+                                }
+                            });
+                        }
+                    });
+
+                    // Video detection in scripts
+                    const scripts = doc.querySelectorAll('script:not([src]), [data-a-video-data]');
+                    scripts.forEach(s => {
+                        const c = s.textContent || s.getAttribute('data-a-video-data') || '';
+                        const mp4s = c.match(/https?:\/\/[^"'\s,\]]+\.(mp4|m3u8|mpd)[^"'\s,\]]*/gi);
+                        if (mp4s) {
+                            mp4s.forEach(vUrl => {
+                                const clean = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '');
+                                if (clean.includes('video') || clean.includes('customer') || clean.includes('review')) {
+                                    const vid = clean.split('?')[0];
+                                    if (!seenVideos.has(vid)) {
+                                        seenVideos.add(vid);
+                                        allVideos.push(clean);
+                                    }
+                                }
+                            });
+                        }
+
+                        // Also look for hidden high-res image patterns in JSON
+                        const imgMatches = c.match(/https?:\/\/[^\"\'\s,\]]+\.(jpg|jpeg|png|webp)[^\"\'\s,\]]*/gi);
+                        if (imgMatches) {
+                            imgMatches.forEach(iUrl => {
+                                if (iUrl.includes('/images/I/') && !iUrl.includes('avatar') && !iUrl.includes('sprite')) {
+                                    const hi = toHighRes(iUrl.replace(/\\u002F/g, '/').replace(/\\/g, ''));
+                                    const b = getImageBase(hi);
+                                    if (!seenImages.has(b) && isValidImage(hi)) {
+                                        seenImages.add(b);
+                                        allImages.push(hi);
+                                    }
+                                }
+                            });
+                        }
+                    });
+
+                    if (!doc.querySelector('.a-pagination .a-last:not(.a-disabled)')) break;
+                } catch (e) { break; }
+            }
+            return { images: allImages, videos: allVideos };
+        }
+
+        // State to track if we've already performed the auto-scroll for the current ASIN
+        let hasAutoScrolled = false;
+        let lastScrapedAsin = '';
+        let lastFetchedReviewAsin = '';
+
+        async function scrapeProductData(triggerScroll: boolean = false): Promise<ProductData> {
             const productImages: string[] = [];
+            const variantImagesMap: Record<string, string[]> = {};
+            const variantImagesByAsin: Record<string, string[]> = {};
             const reviewImages: string[] = [];
             const videos: string[] = [];          // Product videos
             const reviewVideos: string[] = [];    // Customer review videos
@@ -677,12 +895,8 @@ export default defineContentScript({
             }
 
             // Extract ASIN from URL or page (for product pages)
-            let asin = '';
-            const urlMatch = window.location.pathname.match(/\/dp\/([A-Z0-9]{10})/i) ||
-                window.location.pathname.match(/\/gp\/product\/([A-Z0-9]{10})/i);
-            if (urlMatch) {
-                asin = urlMatch[1];
-            } else {
+            let asin = getCurrentAsin();
+            if (!asin) {
                 const asinElement = document.querySelector('[data-asin]');
                 if (asinElement) {
                     asin = asinElement.getAttribute('data-asin') || '';
@@ -692,7 +906,7 @@ export default defineContentScript({
             // Extract product title
             let title = '';
             if (onProductPage) {
-                const titleElement = document.querySelector('#productTitle, #title');
+                const titleElement = document.querySelector('#productTitle, #title, #cm_cr-product_info .a-text-ellipsis a');
                 if (titleElement) {
                     title = titleElement.textContent?.trim() || '';
                 }
@@ -716,9 +930,30 @@ export default defineContentScript({
                 }
             }
 
-            // Extract all variants
-            const variants = onProductPage ? scrapeVariants() : [];
+            // 5. Scrape variants
+            let variants: VariantItem[] = [];
+            let scrapedVariantImages: Record<string, string[]> = {};
+            let scrapedVariantImagesByAsin: Record<string, string[]> = {};
 
+            if (onProductPage) {
+                // scrapeVariants returns VariantItem[] directly
+                const scrapedVariants = scrapeVariants();
+                variants = scrapedVariants;
+
+                // Reconstruct maps from the variants array
+                variants.forEach(v => {
+                    if (v.images && v.images.length > 0) {
+                        scrapedVariantImagesByAsin[v.asin] = v.images;
+                    }
+                });
+            }
+
+            // SYNC LOGIC: If we are on a specific variant page, update that variant's images 
+            // with the full high-res gallery we just scraped from the main page.
+            // Note: uniqueProductImages is populated later, so this sync logic needs to be moved
+            // or `productImages` should be used as the source.
+            // For now, we'll use `productImages` as the source for the sync.
+            // This block will be executed after `productImages` is populated.
 
             // Extract product description (product pages only)
             let description = '';
@@ -732,504 +967,9 @@ export default defineContentScript({
                 description = `${listingProducts.length} products found on this page`;
             }
 
-            // Helper: Filter out unwanted UI/placeholder images
-            function isValidImage(url: string | null | undefined): boolean {
-                if (!url || !url.startsWith('http')) return false;
-
-                const lowerUrl = url.toLowerCase();
-
-                // Exclude SVGs (usually icons/logos)
-                if (lowerUrl.includes('.svg')) return false;
-
-                const unwantedKeywords = [
-                    'sprite', 'transparent', 'pixel', 'placeholder', 'loader', 'loading',
-                    'icon', 'logo', 'button', 'overlay', 'zoom', 'magnifier', 'plus', 'minus',
-                    'caret', 'arrow', 'chevron', 'star', 'rating', 'badge', 'play-button',
-                    'reviews-image-gallery-loading', 'nav-sprite', 'details-gallery-view',
-                    'x-locale', 'maximize', 'minimize', 'remove', 'close', 'delete',
-                    'spin', '360_icon', '360-icon', 'view_full', 'cursor', 'selector',
-                    'play-icon', 'video-icon', 'images/g/', 'common',
-                    'zoom-in', 'zoom-out', 'flyout', 'ui-element'
-                ];
-
-                if (unwantedKeywords.some(kw => lowerUrl.includes(kw))) return false;
-
-                // Exclude user profile avatars in reviews
-                if (lowerUrl.includes('profile') || lowerUrl.includes('avatar')) return false;
-
-                return true;
-            }
-
-            // Helper: Check if an image is from a customer review (not product gallery)
-            // This function validates that an image URL or element is truly from customer reviews
-            function isCustomerReviewImage(url: string, contextElement?: Element | null): boolean {
-                const lowerUrl = url.toLowerCase();
-
-                // Customer review images typically have these patterns in URL
-                // These are reliable indicators of customer-submitted content
-                const customerUrlPatterns = [
-                    'customer-images',
-                    'customerimages',
-                    'customer_images',
-                    'customer-image',
-                    'customerimage',
-                    'customer_image',
-                    'usermedia',
-                    'user-media',
-                    'user_media',
-                    'user-content',
-                    'usercontent',
-                    'user_content',
-                    'ugc',
-                    'review-image',
-                    'reviewimage',
-                    'review_image',
-                    'cm_cr',
-                    'crwidget',
-                    'cr-media'
-                ];
-
-                if (customerUrlPatterns.some(pattern => lowerUrl.includes(pattern))) {
-                    return true;
-                }
-
-                // Check DOM context if available - this is very reliable
-                if (contextElement) {
-                    // Must be within verified customer reviews section
-                    const reviewContainers = [
-                        '#customer-reviews',
-                        '#customerReviews',
-                        '#cm_cr-review_list',
-                        '[data-hook*="review"]',
-                        '.review',
-                        '.cr-widget',
-                        '.cr-media-gallery',
-                        '[data-hook="cr-media-gallery"]',
-                        '.review-image-container',
-                        '[data-hook="review-image-tile"]',
-                        '[id*="review-image-gallery"]',
-                        '[class*="review-media-gallery"]',
-                        '.cr-media-gallery'
-                    ];
-
-                    if (reviewContainers.some(selector => contextElement.closest(selector))) {
-                        return true;
-                    }
-                }
-
-                // Amazon review images often have specific path patterns
-                // Format: /images/I/[IMAGE_ID]._xxx_.jpg - but in review-specific contexts
-                if (lowerUrl.includes('/images/i/') &&
-                    (lowerUrl.includes('._cr') || lowerUrl.includes('cr_'))) {
-                    return true;
-                }
-
-                return false;
-            }
-
-            // Helper: Check if content is from "Similar Brands" or other promotional/non-official sections
-            function isPromotionalContent(content: string, url: string): boolean {
-                const lowerContent = content.toLowerCase();
-                const lowerUrl = url.toLowerCase();
-
-                // Comprehensive patterns indicating promotional/advertising/third-party content
-                const promotionalPatterns = [
-                    // Similar brands and competitor content
-                    'similar brands on amazon',
-                    'similar brand',
-                    'similarbrand',
-                    'competitor',
-                    'compare-with',
-                    'other-brands',
-                    'otherbrand',
-                    'related-brand',
-                    'relatedbrand',
-                    // Sponsored/advertising content
-                    'sponsored',
-                    'advertisement',
-                    'adplaceholder',
-                    'ad-holder',
-                    'ad_holder',
-                    'sp_detail',
-                    'sp-detail',
-                    // Brand story/promotional sections
-                    'brand-video',
-                    'brand_video',
-                    'brandvideo',
-                    'brand-story',
-                    'brand_story',
-                    'brandstory',
-                    'brand-snapshot',
-                    'brandsnapshot',
-                    'from-the-brand',
-                    'fromthebrand',
-                    'from_the_brand',
-                    'explore-brand',
-                    'explorebrand',
-                    'see-all-from-brand',
-                    'more-from-brand',
-                    'morefrom-brand',
-                    // A+ content and enhanced brand content
-                    'aplus-module',
-                    'aplus_module',
-                    'aplusmodule',
-                    'a-plus-content',
-                    'enhanced-brand',
-                    'enhancedbrand',
-                    // Third-party/external content
-                    'thirdparty',
-                    'third-party',
-                    'third_party',
-                    'external-video',
-                    'externalvideo',
-                    // Similarity/comparison widgets
-                    'similarities',
-                    'comparison-widget',
-                    'comparisonwidget',
-                    'also-viewed',
-                    'alsoviewed',
-                    'customers-also',
-                    'frequently-bought',
-                    'shoppable-video',
-                    'shoppablevideo',
-                    'influencer',
-                    'amazon-influence',
-                    'curated',
-                    'editorial',
-                    'expert-recommendation',
-                    'buying-guide',
-                    'top-rated-from-our-brands',
-                    'picked-for-you',
-                    'bought-together',
-                    'bought_together',
-                    'bought-also-bought',
-                    'customers-who-viewed',
-                    'customers_who_viewed',
-                    'viewed-this-item-also-viewed',
-                    'viewed-also-viewed'
-                ];
-
-                if (promotionalPatterns.some(pattern => lowerContent.includes(pattern) || lowerUrl.includes(pattern))) {
-                    return true;
-                }
-
-                return false;
-            }
-
-            // Helper: Check if video is official product video (ONLY from main product gallery)
-            function isOfficialProductVideo(content: string, url: string): boolean {
-                const lowerContent = content.toLowerCase();
-                const lowerUrl = url.toLowerCase();
-
-                // First, STRICTLY exclude if it's promotional/competitor content
-                if (isPromotionalContent(content, url)) {
-                    return false;
-                }
-
-                // Exclude if URL contains non-product patterns
-                const excludeUrlPatterns = [
-                    'brand',
-                    'sponsor',
-                    'advertisement',
-                    'promo',
-                    'similar',
-                    'compare',
-                    'thirdparty',
-                    'external'
-                ];
-
-                if (excludeUrlPatterns.some(pattern => lowerUrl.includes(pattern))) {
-                    return false;
-                }
-
-                // STRICT: Only accept videos from main product gallery contexts
-                const officialPatterns = [
-                    'product-video',
-                    'productvideo',
-                    'product_video',
-                    'main-video',
-                    'mainvideo',
-                    'main_video',
-                    'gallery-video',
-                    'galleryvideo',
-                    'detail-video',
-                    'detailvideo',
-                    'dp-video',
-                    'dpvideo',
-                    'landing-video',
-                    'landingvideo',
-                    'primary-video',
-                    'primaryvideo',
-                    'imageblock',
-                    'image-block',
-                    'image_block',
-                    'altimages',
-                    'alt-images',
-                    'alt_images',
-                    'ivmain',
-                    'iv-main',
-                    'colorimages',
-                    'color-images',
-                    'vse',
-                    'vse-video',
-                    'vse_video'
-                ];
-
-                // Check URL patterns for official product videos
-                const urlIndex = content.indexOf(url);
-                if (urlIndex >= 0) {
-                    const nearbyContext = content.substring(
-                        Math.max(0, urlIndex - 600),
-                        Math.min(content.length, urlIndex + 600)
-                    ).toLowerCase();
-
-                    // STRICTLY exclude if nearby context suggests promotional content
-                    if (isPromotionalContent(nearbyContext, url)) {
-                        return false;
-                    }
-
-                    // MUST be in official product video context to be included
-                    if (officialPatterns.some(pattern => nearbyContext.includes(pattern))) {
-                        return true;
-                    }
-
-                    // If no official pattern found, check if it's in a suspicious context
-                    const suspiciousPatterns = [
-                        'brand',
-                        'story',
-                        'similar',
-                        'compare',
-                        'related',
-                        'also',
-                        'other',
-                        'sponsor',
-                        'ad'
-                    ];
-
-                    if (suspiciousPatterns.some(pattern => nearbyContext.includes(pattern))) {
-                        return false;
-                    }
-                }
-
-                // Default: Only include if URL patterns strictly match official source markers
-                return lowerUrl.includes('product-video') || lowerUrl.includes('official-video');
-            }
-
             // Product page specific scraping
             if (onProductPage) {
-                // Use a Set to track unique base image identifiers
                 const seenImageBases = new Set<string>();
-
-                // Helper to extract unique image base (removes size modifiers but keeps unique identifiers)
-                function getImageBase(url: string): string {
-                    // Extract the core image identifier (everything before the size modifiers)
-                    // Amazon URLs: https://m.media-amazon.com/images/I/[IMAGE_ID]._AC_SX679_.jpg
-                    const match = url.match(/images\/I\/([A-Za-z0-9\-_+%]+)/);
-                    return match ? match[1] : url;
-                }
-
-                // Helper to get high-res version of image
-                function toHighRes(url: string): string {
-                    if (!url) return '';
-                    // Remove all size/transform modifiers to get the original
-                    return url
-                        .replace(/\._[A-Z]{2}_[A-Za-z0-9,_]+_\./, '.')
-                        .replace(/\._AC_.*_\./, '.')
-                        .replace(/\._S[A-Z0-9]+_\./, '.')
-                        .replace(/\._U[A-Z0-9]+_\./, '.')
-                        .replace(/\._CR[0-9,]+_\./, '.')
-                        .replace(/\._X[A-Z0-9]+_\./, '.');
-                }
-
-                // Helper to add image if unique
-                function addUniqueImage(url: string): boolean {
-                    if (!url || !isValidImage(url)) return false;
-                    const highRes = toHighRes(url);
-                    const base = getImageBase(highRes);
-                    if (base && !seenImageBases.has(base)) {
-                        seenImageBases.add(base);
-                        productImages.push(highRes);
-                        return true;
-                    }
-                    return false;
-                }
-
-                // 1. Extract images from Amazon's colorImages/imageGalleryData JSON in page scripts
-                // This is the most reliable source with all product images in correct order
-                const imageScripts = document.querySelectorAll('script:not([src])');
-                let foundColorImages = false;
-
-                imageScripts.forEach(script => {
-                    const content = script.textContent || '';
-                    if (!content || content.length < 100) return;
-
-                    // Primary method: Look for colorImages data structure
-                    // This contains ALL images for the currently selected variant in order
-                    // Format: 'colorImages': { 'initial': [{hiRes: "...", large: "...", ...}, ...] }
-                    if (!foundColorImages) {
-                        // Try to find the full colorImages structure
-                        const colorImagesFullMatch = content.match(/'colorImages'\s*:\s*(\{[\s\S]*?\})\s*,\s*'colorToAsin'/);
-                        if (colorImagesFullMatch) {
-                            try {
-                                // Replace single quotes with double quotes for JSON parsing
-                                let jsonStr = colorImagesFullMatch[1]
-                                    .replace(/'/g, '"')
-                                    .replace(/\\x([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
-
-                                const colorImages = JSON.parse(jsonStr);
-
-                                // 'initial' contains images for currently selected variant
-                                if (colorImages.initial && Array.isArray(colorImages.initial)) {
-                                    foundColorImages = true;
-                                    colorImages.initial.forEach((imgData: any, index: number) => {
-                                        // Prioritize hiRes, then large, then main
-                                        const imgUrl = imgData.hiRes || imgData.large ||
-                                            (imgData.main && typeof imgData.main === 'object' ? Object.values(imgData.main)[0] : imgData.main) || '';
-                                        if (imgUrl && typeof imgUrl === 'string') {
-                                            addUniqueImage(imgUrl);
-                                        }
-                                    });
-                                }
-                            } catch (e) {
-                                // Try simpler parsing
-                            }
-                        }
-                    }
-
-                    // Fallback: Try simpler colorImages pattern
-                    if (!foundColorImages) {
-                        const simpleMatch = content.match(/'colorImages'\s*:\s*\{\s*'initial'\s*:\s*(\[[^\]]+\])/);
-                        if (simpleMatch) {
-                            try {
-                                const jsonStr = simpleMatch[1].replace(/'/g, '"');
-                                const initialImages = JSON.parse(jsonStr);
-                                if (Array.isArray(initialImages)) {
-                                    foundColorImages = true;
-                                    initialImages.forEach((imgData: any) => {
-                                        const imgUrl = imgData.hiRes || imgData.large || '';
-                                        if (imgUrl) addUniqueImage(imgUrl);
-                                    });
-                                }
-                            } catch (e) { }
-                        }
-                    }
-
-                    // Also try imageGalleryData pattern for additional images
-                    const galleryMatch = content.match(/imageGalleryData\s*:\s*(\[[\s\S]*?\])/);
-                    if (galleryMatch) {
-                        try {
-                            const galleryData = JSON.parse(galleryMatch[1]);
-                            galleryData.forEach((item: any) => {
-                                const imgUrl = item.mainUrl || item.hiRes || item.large || '';
-                                if (imgUrl) addUniqueImage(imgUrl);
-                            });
-                        } catch (e) { }
-                    }
-
-                    // Extract individual hiRes URLs from P.when data blocks
-                    const hiResMatches = content.match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/g);
-                    if (hiResMatches) {
-                        hiResMatches.forEach(match => {
-                            const urlMatch = match.match(/"(https:\/\/[^"]+)"/);
-                            if (urlMatch && urlMatch[1]) {
-                                addUniqueImage(urlMatch[1]);
-                            }
-                        });
-                    }
-                });
-
-                // 2. Extract from data-a-dynamic-image attribute on main image
-                const mainImg = document.querySelector<HTMLImageElement>(
-                    '#landingImage, #imgBlkFront, #main-image, #ebooksImgBlkFront'
-                );
-                if (mainImg) {
-                    // Add main image src
-                    if (mainImg.src) {
-                        addUniqueImage(mainImg.src);
-                    }
-
-                    // Parse data-a-dynamic-image JSON for high-res versions
-                    const dynamicImageData = mainImg.getAttribute('data-a-dynamic-image');
-                    if (dynamicImageData) {
-                        try {
-                            const dynamicImages = JSON.parse(dynamicImageData);
-                            // URLs are keys, [width, height] are values
-                            // Sort by size (largest first) and add unique ones
-                            const urls = Object.keys(dynamicImages);
-                            const sorted = urls.sort((a, b) => {
-                                const [w1, h1] = dynamicImages[a] || [0, 0];
-                                const [w2, h2] = dynamicImages[b] || [0, 0];
-                                return (w2 * h2) - (w1 * h1);
-                            });
-                            // Get the largest (first after sort)
-                            if (sorted.length > 0) {
-                                addUniqueImage(sorted[0]);
-                            }
-                        } catch (e) {
-                            console.error('Failed to parse dynamic images', e);
-                        }
-                    }
-                }
-
-                // 3. Extract from altImages thumbnails using their data attributes
-                const thumbItems = document.querySelectorAll('#altImages .a-spacing-small.item, #altImages li.a-declarative');
-                thumbItems.forEach((item) => {
-                    // Skip video thumbnails
-                    if (item.classList.contains('videoThumbnail') || item.querySelector('.videoThumbnail')) return;
-
-                    const img = item.querySelector<HTMLImageElement>('img');
-                    if (!img) return;
-
-                    // Try to get hiRes URL from various data attributes
-                    let hiResUrl = '';
-
-                    // Check data-old-hires attribute
-                    hiResUrl = img.getAttribute('data-old-hires') || '';
-
-                    // Check parent's data for image URL
-                    if (!hiResUrl) {
-                        const parentData = item.getAttribute('data-csa-c-element-type');
-                        if (parentData === 'video') return; // Skip video
-                    }
-
-                    // Convert thumbnail to hiRes
-                    if (!hiResUrl && img.src) {
-                        // Thumbnails typically use patterns like _US40_, _SS40_, _AC_US40_
-                        hiResUrl = toHighRes(img.src);
-                    }
-
-                    if (hiResUrl) {
-                        addUniqueImage(hiResUrl);
-                    }
-                });
-
-                // 4. Extract from image block wrapper spans (newer Amazon layout)
-                const imageWrappers = document.querySelectorAll('#imageBlock_feature_div [data-action="main-image-click"]');
-                imageWrappers.forEach((wrapper) => {
-                    const img = wrapper.querySelector<HTMLImageElement>('img');
-                    if (img?.src) {
-                        addUniqueImage(img.src);
-                    }
-                });
-
-                // 5. Variant/Swatch Images (different colors/styles)
-                const variantElements = document.querySelectorAll(
-                    '#variation_color_name li img, #variation_style_name li img, ' +
-                    '.swatchAvailable img, .imgSwatch img, [data-dp-url] img'
-                );
-                variantElements.forEach((img: Element) => {
-                    const imgEl = img as HTMLImageElement;
-                    if (imgEl.src) {
-                        addUniqueImage(imgEl.src);
-                    }
-                });
-
-                console.log(`AMZImage: Found ${productImages.length} unique product images`);
-
-                // ==========================================
-                // REVIEW IMAGES - Comprehensive extraction from embedded JSON data
-                // No scrolling required - all data available on page load
-                // ==========================================
                 const seenReviewBases = new Set<string>();
 
                 function addUniqueReviewImage(url: string, contextContent: string = ''): boolean {
@@ -1247,6 +987,148 @@ export default defineContentScript({
                     }
                     return false;
                 }
+
+                function addUniqueImage(url: string): boolean {
+                    if (!url || !isValidImage(url)) return false;
+                    const highRes = toHighRes(url);
+                    const base = getImageBase(highRes);
+                    if (base && !seenImageBases.has(base)) {
+                        seenImageBases.add(base);
+                        productImages.push(highRes);
+                        return true;
+                    }
+                    return false;
+                }
+
+                // 1. Extract images from Scraped Variants (Source of Truth)
+                // Instead of re-parsing colorImages here, we use the robust data from scrapeVariants()
+                // which has already fused ASINs, Names, and Images.
+                let foundVariantImages = false;
+
+                if (variants.length > 0) {
+                    variants.forEach(v => {
+                        if (v.images && v.images.length > 0) {
+                            // Populate maps for Panel usage
+                            if (v.name) variantImagesMap[v.name] = v.images;
+                            if (v.asin) variantImagesByAsin[v.asin] = v.images;
+
+                            // If this is the active/selected variant, add its images to the main gallery
+                            if (v.selected) {
+                                v.images.forEach(url => addUniqueImage(url));
+                                foundVariantImages = true;
+                            }
+                        }
+                    });
+
+                    // If no variant is explicitly selected (rare), but we have variants, 
+                    // try to add images from the first available one to ensure WE SHOW SOMETHING.
+                    if (!foundVariantImages && variants.some(v => v.available && v.images && v.images.length > 0)) {
+                        const firstSafe = variants.find(v => v.available && v.images && v.images.length > 0);
+                        if (firstSafe && firstSafe.images) {
+                            firstSafe.images.forEach(url => addUniqueImage(url));
+                            foundVariantImages = true;
+                        }
+                    }
+                }
+
+                if (foundVariantImages) {
+                    console.log(`AMZImage: Populated main gallery from selected variant (${productImages.length} images).`);
+                } else {
+                    // Fallback: If for some reason we missed the variant images (or it's a single product),
+                    // try the standard fallback methods.
+
+                    // 2. Extract from data-a-dynamic-image attribute on main image
+                    const mainImg = document.querySelector<HTMLImageElement>(
+                        '#landingImage, #imgBlkFront, #main-image, #ebooksImgBlkFront'
+                    );
+                    if (mainImg) {
+                        // Add main image src
+                        if (mainImg.src) {
+                            addUniqueImage(mainImg.src);
+                        }
+
+                        // Parse data-a-dynamic-image JSON for high-res versions
+                        const dynamicImageData = mainImg.getAttribute('data-a-dynamic-image');
+                        if (dynamicImageData) {
+                            try {
+                                const dynamicImages = JSON.parse(dynamicImageData);
+                                const urls = Object.keys(dynamicImages);
+                                const sorted = urls.sort((a, b) => {
+                                    const [w1, h1] = dynamicImages[a] || [0, 0];
+                                    const [w2, h2] = dynamicImages[b] || [0, 0];
+                                    return (w2 * h2) - (w1 * h1);
+                                });
+                                if (sorted.length > 0) {
+                                    addUniqueImage(sorted[0]);
+                                }
+                            } catch (e) {
+                                console.error('Failed to parse dynamic images', e);
+                            }
+                        }
+                    }
+
+                    // 3. Extract from altImages thumbnails
+                    const thumbItems = document.querySelectorAll('#altImages .a-spacing-small.item, #altImages li.a-declarative');
+                    thumbItems.forEach((item) => {
+                        if (item.classList.contains('videoThumbnail') || item.querySelector('.videoThumbnail')) return;
+                        const img = item.querySelector<HTMLImageElement>('img');
+                        if (!img) return;
+
+                        let hiResUrl = img.getAttribute('data-old-hires') || '';
+                        if (!hiResUrl && img.src) {
+                            hiResUrl = toHighRes(img.src);
+                        }
+                        if (hiResUrl) {
+                            addUniqueImage(hiResUrl);
+                        }
+                    });
+
+                    // 4. Extract from carousels (data-a-carousel-options)
+                    const carousels = document.querySelectorAll('[data-a-carousel-options]');
+                    carousels.forEach(carousel => {
+                        const options = carousel.getAttribute('data-a-carousel-options');
+                        if (options) {
+                            const urls = options.match(/https?:\/\/[^\"\'\s,\]]+\.(jpg|jpeg|png|webp)[^\"\'\s,\]]*/gi);
+                            if (urls) urls.forEach(url => addUniqueImage(url));
+                        }
+                    });
+
+                    // 5. Extract from image block wrapper spans
+                    const imageWrappers = document.querySelectorAll('#imageBlock_feature_div [data-action="main-image-click"]');
+                    imageWrappers.forEach((wrapper) => {
+                        const img = wrapper.querySelector<HTMLImageElement>('img');
+                        if (img?.src) {
+                            addUniqueImage(img.src);
+                        }
+                    });
+                }
+
+                // 5. Variant/Swatch Images - EXCLUDED to prevent bleed-over
+                // We only want images mapping to the selected variant, not the option icons themselves
+                /*
+                const variantElements = document.querySelectorAll(
+                    '#variation_color_name li img, #variation_style_name li img, ' +
+                    '.swatchAvailable img, .imgSwatch img, [data-dp-url] img'
+                );
+                variantElements.forEach((img: Element) => {
+                    const imgEl = img as HTMLImageElement;
+                    if (imgEl.src) {
+                        addUniqueImage(imgEl.src);
+                    }
+                });
+                */
+
+                console.log(`AMZImage: Found ${productImages.length} unique product images`);
+
+                // ==========================================
+                // REVIEW IMAGES - Comprehensive extraction from embedded JSON data
+                // No scrolling required - all data available on page load
+                // ==========================================
+
+                const imageScripts = document.querySelectorAll('script:not([src])');
+                // REVIEW IMAGES - Comprehensive extraction from embedded JSON data
+                // No scrolling required - all data available on page load
+                // ==========================================
 
                 // 1. PRIMARY: Extract review images from ALL embedded script data
                 // Amazon embeds review media data in multiple script tags on page load
@@ -1421,6 +1303,7 @@ export default defineContentScript({
                             reelData.forEach((item: any) => {
                                 const url = item.hiResUrl || item.url || '';
                                 if (url) addUniqueReviewImage(url);
+                                if (item.videoUrl) addReviewVideo(item.videoUrl);
                             });
                         } catch (e) { }
                     }
@@ -1449,93 +1332,29 @@ export default defineContentScript({
                     }
                 });
 
-                // 2. SECONDARY: DOM extraction for review images
-                // These selectors cover all known Amazon review image containers
-                const strictReviewImgSelectors = [
-                    // Main review section images
-                    '#customer-reviews .review-image-tile',
-                    '#customer-reviews .review-image-thumbnail',
-                    '#customer-reviews img[data-hook="review-image-tile"]',
-                    // Customer review media gallery
-                    '[data-hook="cr-media-gallery"] img',
-                    '[data-hook="cr-media-gallery"] .cr-media-thumbnail img',
-                    '.cr-media-gallery-card img',
-                    // Review list images
-                    '#cm_cr-review_list .review-image-tile',
-                    '#cm_cr-review_list img.review-image',
-                    // Widget and focal reviews
-                    '.cr-widget-FocalReviews .review-image-tile',
-                    '.cr-widget-FocalReviews img',
-                    '#customerReviews .review-image-tile',
-                    // Review body images
-                    '[data-hook="review-body"] img',
-                    '[data-hook="review-collapsed"] img',
-                    '.review-data img',
-                    // Review image containers
-                    '.review .review-image-container img',
+                // 2. Extract from visible review tiles in DOM
+                const reviewImageSelectors = [
+                    '[data-hook="review-image-tile"]',
+                    '.review-image-tile',
+                    '.review-image-thumbnail',
+                    '.cr-media-gallery .cr-lightbox-image-thumbnail',
+                    '#cm_cr-review_list img[data-src]',
                     '.review-image-container img',
-                    // Media specific
-                    '.cr-lightbox-image-thumbnail img',
-                    '.cr-lightbox-image-view img',
-                    '.review-image-tile img',
-                    '[data-hook="review-image"] img',
-                    '#customer-reviews .a-carousel-card img',
-                    '#reviews-image-gallery .a-carousel-card img',
-                    '.cr-media-gallery-popover-data img'
+                    '.cr-media-card-container img'
                 ];
 
-                document.querySelectorAll<HTMLImageElement>(strictReviewImgSelectors.join(', '))
-                    .forEach((img) => {
-                        // Check for promotional parent section early
-                        const promotionalParent = img.closest('.aplus-v2, [id*="similar"], [class*="similar"], [id*="sponsored"], [class*="sponsored"]');
-                        const parentText = promotionalParent instanceof HTMLElement ? promotionalParent.innerText : '';
-                        if (isPromotionalContent(parentText, img.src)) return;
-
-                        // Try multiple src sources
-                        const src = img.src ||
-                            img.getAttribute('data-src') ||
-                            img.getAttribute('data-a-dynamic-image') ||
-                            '';
-
-                        // Parse data-a-dynamic-image if present (contains hi-res URLs)
-                        if (img.hasAttribute('data-a-dynamic-image')) {
-                            try {
-                                const dynamicData = JSON.parse(img.getAttribute('data-a-dynamic-image') || '{}');
-                                const urls = Object.keys(dynamicData);
-                                if (urls.length > 0) {
-                                    // Sort by size and get largest
-                                    const sorted = urls.sort((a, b) => {
-                                        const [w1, h1] = dynamicData[a] || [0, 0];
-                                        const [w2, h2] = dynamicData[b] || [0, 0];
-                                        return (w2 * h2) - (w1 * h1);
-                                    });
-                                    if (sorted[0]) {
-                                        addUniqueReviewImage(sorted[0]);
-                                    }
-                                }
-                            } catch (e) {
-                                // Fallback to src
-                            }
-                        }
-
-                        if (src &&
-                            !src.startsWith('data:') &&
-                            !src.includes('profile') &&
-                            !src.includes('avatar') &&
-                            !src.includes('star') &&
-                            !src.includes('icon') &&
-                            !src.includes('sprite')) {
-                            // Verify the image is within a review context
-                            if (isCustomerReviewImage(src, img)) {
-                                addUniqueReviewImage(src);
-                            } else if (img.closest('#customer-reviews') ||
-                                img.closest('[data-hook*="review"]') ||
-                                img.closest('#cm_cr-review_list') ||
-                                img.closest('[id*="review"]') ||
-                                img.closest('[class*="review"]') ||
-                                (img.alt && (img.alt.toLowerCase().includes('review') || img.alt.toLowerCase().includes('customer image')))) {
-                                // Accept if DOM context or alt text confirms review section
-                                addUniqueReviewImage(src);
+                document.querySelectorAll(reviewImageSelectors.join(', '))
+                    .forEach((el) => {
+                        const img = el.tagName === 'IMG' ? (el as HTMLImageElement) : el.querySelector('img');
+                        if (img) {
+                            const val = img.src || img.getAttribute('data-src') || '';
+                            if (val) addUniqueReviewImage(val, el.parentElement?.textContent || '');
+                        } else if (el.tagName === 'DIV' || el.tagName === 'A') {
+                            const style = window.getComputedStyle(el);
+                            const bg = style.backgroundImage;
+                            if (bg && bg.startsWith('url(')) {
+                                const msg = bg.replace(/^url\(['"]?/, '').replace(/['"]?\)$/, '');
+                                addUniqueReviewImage(msg);
                             }
                         }
                     });
@@ -1559,7 +1378,7 @@ export default defineContentScript({
                 console.log(`AMZImage: Found ${reviewImages.length} review images`);
 
                 // ==========================================
-                // VIDEOS - Separate Product Videos and Review Videos
+                // VIDEO EXTRACTION - Product & Reviews
                 // ==========================================
                 const seenAllVideoIds = new Set<string>();
 
@@ -2064,45 +1883,116 @@ export default defineContentScript({
                         // Otherwise, don't add - ambiguous source
                     });
 
-                console.log(`AMZImage: Found ${videos.length} product videos, ${reviewVideos.length} review videos`);
+                // Reset scroll state if ASIN changed
+                if (asin && asin !== lastScrapedAsin) {
+                    lastScrapedAsin = asin;
+                    hasAutoScrolled = false;
+                }
+
+                if (onProductPage && asin && triggerScroll && !hasAutoScrolled) {
+                    // Mark as scrolled so we don't do it again for this ASIN
+                    hasAutoScrolled = true;
+                    // Trigger dynamic loads on page (scrolling)
+                    await triggerReviewMediaLoad();
+                }
+
+                // Background fetch across ALL pages (limit increased significantly)
+                // runs ONCE per ASIN change, regardless of triggerScroll
+                if (onProductPage && asin && asin !== lastFetchedReviewAsin) {
+                    lastFetchedReviewAsin = asin;
+                    const extra = await fetchAllReviewMedia(asin, 40);
+                    if (extra.images.length > 0) {
+                        extra.images.forEach(img => {
+                            const hi = toHighRes(img);
+                            const b = getImageBase(hi);
+                            if (!seenReviewBases.has(b)) {
+                                seenReviewBases.add(b);
+                                reviewImages.push(hi);
+                            }
+                        });
+                    }
+                    if (extra.videos.length > 0) reviewVideos.push(...extra.videos);
+                }
+
+                // Capture from any open modals or gallery state JSON
+                const modalState = document.querySelector('[data-a-modal-state]')?.getAttribute('data-a-modal-state');
+                if (modalState && (modalState.includes('review') || modalState.includes('customer'))) {
+                    const urls = modalState.match(/https:\/\/[^"'\s,\]\[\}]+\.(jpg|jpeg|png|webp)[^"'\s,\]\[\}]*/gi);
+                    if (urls) {
+                        urls.forEach(url => {
+                            const hi = toHighRes(url.replace(/\\u002F/g, '/').replace(/\\/g, ''));
+                            // Add to reviewImages if not already present
+                            const b = getImageBase(hi);
+                            if (!seenReviewBases.has(b)) {
+                                seenReviewBases.add(b);
+                                reviewImages.push(hi);
+                            }
+                        });
+                    }
+                }
             }
+
+            console.log(`AMZImage: Final counts - ${reviewImages.length} review imgs, ${reviewVideos.length} review vids`);
 
             // Capture active image (main displayed image)
             let activeImage = '';
             const landingImage = document.querySelector('#landingImage') as HTMLImageElement;
             if (landingImage && landingImage.src) {
                 activeImage = landingImage.src;
-                // Clean URL
                 if (activeImage.startsWith('http')) {
                     activeImage = activeImage.replace(/\._AC_[a-zA-Z0-9]+_\./, '.');
                     activeImage = activeImage.replace(/\._[a-zA-Z]+[0-9]+_\./, '.');
                 }
             }
 
-            // Ensure unique images and prioritize active image
-            let uniqueProductImages = [...new Set(productImages)];
-
+            const uniqueProductImages = [...new Set(productImages)];
             if (activeImage) {
-                // Remove active image if it exists elsewhere in the list to avoid duplicates
-                uniqueProductImages = uniqueProductImages.filter(img => img !== activeImage);
-                // Add active image to the front
-                uniqueProductImages.unshift(activeImage);
+                const hi = toHighRes(activeImage);
+                const idx = uniqueProductImages.indexOf(hi);
+                if (idx > -1) uniqueProductImages.splice(idx, 1);
+                uniqueProductImages.unshift(hi);
             }
 
+            // SYNC: Update current variant with fully scraped gallery from main page
+            if (asin && variants.length > 0 && uniqueProductImages.length > 1) {
+                const currentVariant = variants.find(v => v.asin === asin);
+                if (currentVariant) {
+                    // Update if main gallery has more images or if variant has few
+                    if (!currentVariant.images || uniqueProductImages.length > currentVariant.images.length) {
+                        currentVariant.images = [...uniqueProductImages];
+                        // Keep map in sync
+                        scrapedVariantImagesByAsin[asin] = [...uniqueProductImages];
+                    }
+                }
+            }
+
+            // Final return for product pages
+            if (onProductPage) {
+                return {
+                    pageType, asin, title: title.substring(0, 120),
+                    variant, variants, description, activeImage,
+                    productImages: uniqueProductImages,
+                    variantImages: variantImagesMap,
+                    variantImagesByAsin: variantImagesByAsin,
+                    reviewImages: [...new Set(reviewImages)],
+                    videos: [...new Set(videos)],
+                    reviewVideos: [...new Set(reviewVideos)],
+                    listingProducts
+                };
+            }
+
+            // Fallback return for non-product/listing pages
             return {
-                pageType,
-                asin,
-                title: title.substring(0, 120) + (title.length > 120 ? '...' : ''),
-                variant,
-                variants,
-                description,
-                activeImage,
-                productImages: uniqueProductImages,
+                pageType, asin, title: title.substring(0, 120),
+                variant, variants, description: description, activeImage: '',
+                productImages: [...new Set(productImages)],
+                variantImages: variantImagesMap,
+                variantImagesByAsin: variantImagesByAsin,
                 reviewImages: [...new Set(reviewImages)],
                 videos: [...new Set(videos)],
                 reviewVideos: [...new Set(reviewVideos)],
-                listingProducts: listingProducts
+                listingProducts
             };
         }
-    },
+    }
 });
