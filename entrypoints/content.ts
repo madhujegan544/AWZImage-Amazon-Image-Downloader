@@ -39,10 +39,36 @@ export default defineContentScript({
     main() {
         console.log('AMZImage Content Script Loaded');
 
-        // Track last known main image to detect variant changes
         let lastMainImageSrc = '';
         let lastAsin = '';
+        let lastUrl = window.location.href;
         let refreshDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+        let navigationCheckInterval: ReturnType<typeof setInterval> | null = null;
+
+        // Poll for URL/ASIN changes (handle SPA navigation)
+        function startNavigationListener() {
+            if (navigationCheckInterval) clearInterval(navigationCheckInterval);
+
+            navigationCheckInterval = setInterval(() => {
+                const currentUrl = window.location.href;
+                const currentAsin = getCurrentAsin();
+
+                // Check if we navigated to a new page/product
+                if (currentUrl !== lastUrl) {
+                    lastUrl = currentUrl;
+
+                    // If ASIN changed, it's definitely a new product
+                    if (currentAsin && currentAsin !== lastAsin) {
+                        console.log('AMZImage: Navigation detected', { from: lastAsin, to: currentAsin });
+                        lastAsin = currentAsin;
+                        lastMainImageSrc = ''; // Reset so we detect new images
+                        notifyContentChange('product_changed');
+                    }
+                }
+            }, 1000);
+        }
+
+        startNavigationListener();
 
         // Integrated Website-Wide Preview Modal State
         let previewState = {
@@ -129,7 +155,7 @@ export default defineContentScript({
                     
                     <div id="amz-preview-container" style="max-width:92%; max-height:82%; display:flex; align-items:center; justify-content:center; animation: amzFadeIn 0.3s ease-out; overflow:hidden; border-radius:12px;">
                         ${isVideo ?
-                    `<video src="${url}" controls autoPlay loop style="max-width:100%; max-height:84vh; border-radius:12px; box-shadow:0 20px 60px rgba(0,0,0,0.7); outline:none; transition: transform 0.3s cubic-bezier(0.2, 0, 0.2, 1);"></video>` :
+                    `<video src="${url}" controls autoPlay muted loop style="max-width:100%; max-height:84vh; border-radius:12px; box-shadow:0 20px 60px rgba(0,0,0,0.7); outline:none; transition: transform 0.3s cubic-bezier(0.2, 0, 0.2, 1);"></video>` :
                     `<img src="${url}" style="max-width:100%; max-height:84vh; border-radius:12px; box-shadow:0 20px 60px rgba(0,0,0,0.7); object-fit:contain; cursor: zoom-in; transition: transform 0.3s cubic-bezier(0.2, 0, 0.2, 1); transform: scale(1);">`
                 }
                     </div>
@@ -320,13 +346,50 @@ export default defineContentScript({
             console.log('AMZImage: Variant observer initialized');
         }
 
+        // Prefetch cache for review media
+        let prefetchedReviewImages: string[] = [];
+        let prefetchedReviewVideos: string[] = [];
+        let prefetchedAsin = '';
+
+        // Preemptively fetch review media as soon as page loads
+        async function prefetchReviewMedia() {
+            const asin = getCurrentAsin();
+            if (!asin || !isProductPage()) return;
+            if (asin === prefetchedAsin) return; // Already fetched for this ASIN
+
+            console.log('AMZImage: Prefetching review media for', asin);
+            prefetchedAsin = asin;
+
+            try {
+                // Fetch silently via API (no scrolling)
+
+                // Then fetch additional pages via API
+                const extra = await fetchAllReviewMedia(asin, 100);
+                prefetchedReviewImages = extra.images;
+                prefetchedReviewVideos = extra.videos;
+
+                console.log('AMZImage: Prefetch complete -', prefetchedReviewImages.length, 'images,', prefetchedReviewVideos.length, 'videos');
+
+                // Notify panel that new data is available
+                if (prefetchedReviewImages.length > 0 || prefetchedReviewVideos.length > 0) {
+                    notifyContentChange('prefetch_complete');
+                }
+            } catch (e) {
+                console.warn('AMZImage: Prefetch error', e);
+            }
+        }
+
         // Initialize observer when DOM is ready
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', () => {
                 setTimeout(setupVariantObserver, 500);
+                // Start prefetching review media immediately
+                setTimeout(prefetchReviewMedia, 1000);
             });
         } else {
             setTimeout(setupVariantObserver, 500);
+            // Start prefetching review media immediately
+            setTimeout(prefetchReviewMedia, 1000);
         }
 
         // Listen for messages from background script and sidepanel
@@ -692,173 +755,146 @@ export default defineContentScript({
         // =========================================================================
 
         /**
-         * Triggers lazy loading by scrolling through the entire page and specific sections.
+         * Previously performed page scrolling to trigger lazy loading.
+         * Now a no-op; we rely on fetchAllReviewMedia for silent API-based fetching.
          */
         async function triggerReviewMediaLoad() {
-            // 1. Scroll main page in increments to trigger listing/lazy images
-            const scrollStep = 800;
-            const totalHeight = document.documentElement.scrollHeight;
-            for (let current = 0; current < totalHeight; current += scrollStep) {
-                window.scrollTo(0, current);
-                // Smaller delay for faster page scan
-                if (current % 2400 === 0) await new Promise(r => setTimeout(r, 100));
-            }
-            window.scrollTo(0, 0); // Reset
-
-            // 2. Focused scrolling for review sections
-            const reviewElements = [
-                '#customer-reviews',
-                '#reviews-medley-footer',
-                '#cm_cr-review_list',
-                '[data-hook="review-image-tile"]',
-                '.cr-media-gallery-popover-trigger',
-                '#altImages',
-                '#imageBlock'
-            ];
-
-            for (const selector of reviewElements) {
-                const el = document.querySelector(selector);
-                if (el) {
-                    el.scrollIntoView({ block: 'center' });
-                    await new Promise(r => setTimeout(r, 200));
-                }
-            }
-
-            // Scroll through image tiles and thumbnails to trigger high-res loads
-            const tiles = document.querySelectorAll('[data-hook="review-image-tile"], #altImages img');
-            for (let i = 0; i < Math.min(tiles.length, 20); i++) {
-                tiles[i].scrollIntoView({ block: 'nearest' });
-            }
+            // No scrolling - keeps user experience smooth
+            // Review media is fetched silently via fetchAllReviewMedia
         }
 
-        async function fetchAllReviewMedia(asin: string, limit: number = 8): Promise<{ images: string[], videos: string[] }> {
+        async function fetchAllReviewMedia(asin: string, limit: number = 100): Promise<{ images: string[], videos: string[] }> {
             const allImages: string[] = [];
             const allVideos: string[] = [];
             const seenImages = new Set<string>();
             const seenVideos = new Set<string>();
 
-            for (let page = 1; page <= limit; page++) {
-                try {
-                    const url = `https://${window.location.hostname}/product-reviews/${asin}/?reviewerType=all_reviews&mediaType=media_reviews_only&pageNumber=${page}`;
-                    const response = await fetch(url);
-                    if (!response.ok) break;
-                    const html = await response.text();
-                    const parser = new DOMParser();
-                    const doc = parser.parseFromString(html, 'text/html');
+            // Concurrent Fetching: Process pages in blocks for speed
+            const CHUNK_SIZE = 5;
+            for (let chunkStart = 1; chunkStart <= limit; chunkStart += CHUNK_SIZE) {
+                const chunkEnd = Math.min(chunkStart + CHUNK_SIZE - 1, limit);
+                const promises = [];
 
-                    const tiles = doc.querySelectorAll([
-                        '.review-image-tile img',
-                        '.review-image-thumbnail img',
-                        '[data-hook="review-image-tile"] img',
-                        '.cr-media-card img',
-                        '.cr-media-thumbnail img',
-                        '.a-carousel-card img'
-                    ].join(', '));
+                for (let page = chunkStart; page <= chunkEnd; page++) {
+                    promises.push((async (p) => {
+                        try {
+                            const url = `https://${window.location.hostname}/product-reviews/${asin}/?reviewerType=all_reviews&mediaType=media_reviews_only&pageNumber=${p}`;
+                            const response = await fetch(url);
+                            if (!response.ok) return false;
+                            const html = await response.text();
+                            const parser = new DOMParser();
+                            const doc = parser.parseFromString(html, 'text/html');
 
-                    if (tiles.length === 0 && page === 1) {
-                        // If no tiles on page 1, maybe it's a different review layout
-                        // Check for common review images in the body
-                        const bodyImgs = doc.querySelectorAll('.review-image img, .review-data img');
-                        bodyImgs.forEach(img => {
-                            const src = (img as HTMLImageElement).src || img.getAttribute('data-src');
-                            if (src && isValidImage(src)) {
-                                const hi = toHighRes(src);
-                                const b = getImageBase(hi);
-                                if (!seenImages.has(b)) {
-                                    seenImages.add(b);
-                                    allImages.push(hi);
-                                }
+                            const tiles = doc.querySelectorAll([
+                                '.review-image-tile img',
+                                '.review-image-thumbnail img',
+                                '[data-hook="review-image-tile"] img',
+                                '.cr-media-card img',
+                                '.cr-media-thumbnail img',
+                                '.a-carousel-card img'
+                            ].join(', '));
+
+                            if (tiles.length === 0 && p === 1) {
+                                // Fallback for alternative layouts
+                                const bodyImgs = doc.querySelectorAll('.review-image img, .review-data img');
+                                bodyImgs.forEach(img => {
+                                    const src = (img as HTMLImageElement).src || img.getAttribute('data-src');
+                                    if (src && isValidImage(src)) {
+                                        const hi = toHighRes(src);
+                                        const b = getImageBase(hi);
+                                        if (!seenImages.has(b)) {
+                                            seenImages.add(b);
+                                            allImages.push(hi);
+                                        }
+                                    }
+                                });
                             }
-                        });
-                    }
 
-                    tiles.forEach(img => {
-                        const src = (img as HTMLImageElement).src || img.getAttribute('data-src');
-                        if (src && src.startsWith('http') && !src.includes('avatar') && !src.includes('sprite')) {
-                            const hi = toHighRes(src);
-                            const b = getImageBase(hi);
-                            if (!seenImages.has(b)) {
-                                seenImages.add(b);
-                                allImages.push(hi);
-                            }
-                        }
-                    });
-
-                    if (tiles.length === 0 && page > 1) break;
-
-                    // Parse carousel and other JSON attributes in the fetched doc
-                    const jsonEls = doc.querySelectorAll('[data-a-carousel-options], [data-a-modal-state], [data-a-video-data]');
-                    jsonEls.forEach(el => {
-                        const content = el.getAttribute('data-a-carousel-options') ||
-                            el.getAttribute('data-a-modal-state') ||
-                            el.getAttribute('data-a-video-data') || '';
-
-                        // Scan for videos
-                        const vMatch = content.match(/https?:\/\/[^\"\'\s,\]]+\.(mp4|m3u8|mpd|webm)[^\"\'\s,\]]*/gi);
-                        if (vMatch) {
-                            vMatch.forEach(vUrl => {
-                                const clean = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                const vid = clean.split('?')[0];
-                                if (!seenVideos.has(vid)) {
-                                    seenVideos.add(vid);
-                                    allVideos.push(clean);
-                                }
-                            });
-                        }
-
-                        // Scan for images
-                        const iMatch = content.match(/https?:\/\/[^\"\'\s,\]]+\.(jpg|jpeg|png|webp)[^\"\'\s,\]]*/gi);
-                        if (iMatch) {
-                            iMatch.forEach(iUrl => {
-                                if (iUrl.includes('/images/I/') && !iUrl.includes('avatar') && !iUrl.includes('sprite')) {
-                                    const hi = toHighRes(iUrl.replace(/\\u002F/g, '/').replace(/\\/g, ''));
+                            tiles.forEach(img => {
+                                const src = (img as HTMLImageElement).src || img.getAttribute('data-src');
+                                if (src && src.startsWith('http') && !src.includes('avatar') && !src.includes('sprite')) {
+                                    const hi = toHighRes(src);
                                     const b = getImageBase(hi);
-                                    if (!seenImages.has(b) && isValidImage(hi)) {
+                                    if (!seenImages.has(b)) {
                                         seenImages.add(b);
                                         allImages.push(hi);
                                     }
                                 }
                             });
-                        }
-                    });
 
-                    // Video detection in scripts
-                    const scripts = doc.querySelectorAll('script:not([src]), [data-a-video-data]');
-                    scripts.forEach(s => {
-                        const c = s.textContent || s.getAttribute('data-a-video-data') || '';
-                        const mp4s = c.match(/https?:\/\/[^"'\s,\]]+\.(mp4|m3u8|mpd)[^"'\s,\]]*/gi);
-                        if (mp4s) {
-                            mp4s.forEach(vUrl => {
-                                const clean = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                if (clean.includes('video') || clean.includes('customer') || clean.includes('review')) {
-                                    const vid = clean.split('?')[0];
-                                    if (!seenVideos.has(vid)) {
-                                        seenVideos.add(vid);
-                                        allVideos.push(clean);
-                                    }
+                            // Parse JSON attributes in the fetched doc
+                            const jsonEls = doc.querySelectorAll('[data-a-carousel-options], [data-a-modal-state], [data-a-video-data]');
+                            jsonEls.forEach(el => {
+                                const content = el.getAttribute('data-a-carousel-options') ||
+                                    el.getAttribute('data-a-modal-state') ||
+                                    el.getAttribute('data-a-video-data') || '';
+
+                                // Scan for videos (Stricter Review filtering)
+                                const vMatch = content.match(/https?:\/\/[^\"\'\s,\]]+\.(mp4|m3u8|mpd|webm)[^\"\'\s,\]]*/gi);
+                                if (vMatch) {
+                                    vMatch.forEach(vUrl => {
+                                        const clean = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '');
+                                        // Ensure it's a review video
+                                        if ((clean.includes('customer') || clean.includes('review') || clean.includes('cr-media'))
+                                            && !clean.includes('vss_public') && !clean.includes('aplus')) {
+                                            const vid = clean.split('?')[0];
+                                            if (!seenVideos.has(vid)) {
+                                                seenVideos.add(vid);
+                                                allVideos.push(clean);
+                                            }
+                                        }
+                                    });
+                                }
+
+                                // Scan for images
+                                const iMatch = content.match(/https?:\/\/[^\"\'\s,\]]+\.(jpg|jpeg|png|webp)[^\"\'\s,\]]*/gi);
+                                if (iMatch) {
+                                    iMatch.forEach(iUrl => {
+                                        if (iUrl.includes('/images/I/') && !iUrl.includes('avatar') && !iUrl.includes('sprite')) {
+                                            const hi = toHighRes(iUrl.replace(/\\u002F/g, '/').replace(/\\/g, ''));
+                                            const b = getImageBase(hi);
+                                            if (!seenImages.has(b) && isValidImage(hi)) {
+                                                seenImages.add(b);
+                                                allImages.push(hi);
+                                            }
+                                        }
+                                    });
                                 }
                             });
-                        }
 
-                        // Also look for hidden high-res image patterns in JSON
-                        const imgMatches = c.match(/https?:\/\/[^\"\'\s,\]]+\.(jpg|jpeg|png|webp)[^\"\'\s,\]]*/gi);
-                        if (imgMatches) {
-                            imgMatches.forEach(iUrl => {
-                                if (iUrl.includes('/images/I/') && !iUrl.includes('avatar') && !iUrl.includes('sprite')) {
-                                    const hi = toHighRes(iUrl.replace(/\\u002F/g, '/').replace(/\\/g, ''));
-                                    const b = getImageBase(hi);
-                                    if (!seenImages.has(b) && isValidImage(hi)) {
-                                        seenImages.add(b);
-                                        allImages.push(hi);
-                                    }
+                            // Video detection in scripts
+                            const scripts = doc.querySelectorAll('script:not([src])');
+                            scripts.forEach(s => {
+                                const c = s.textContent || '';
+                                if (c.length < 50) return;
+
+                                const vMatch = c.match(/https?:\/\/[^\"\'\s,\]\[\}]+\.(mp4|m3u8|mpd|webm)[^\"\'\s,\]\[\}]*/gi);
+                                if (vMatch) {
+                                    vMatch.forEach(vUrl => {
+                                        const clean = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '');
+                                        if ((clean.includes('customer') || clean.includes('review') || clean.includes('cr-media'))
+                                            && !clean.includes('vss_public') && !clean.includes('aplus')) {
+                                            const vid = clean.split('?')[0];
+                                            if (!seenVideos.has(vid)) {
+                                                seenVideos.add(vid);
+                                                allVideos.push(clean);
+                                            }
+                                        }
+                                    });
                                 }
                             });
-                        }
-                    });
 
-                    if (!doc.querySelector('.a-pagination .a-last:not(.a-disabled)')) break;
-                } catch (e) { break; }
+                            return tiles.length > 0 || doc.querySelector('.a-pagination .a-last:not(.a-disabled)') !== null;
+                        } catch (e) {
+                            return false;
+                        }
+                    })(page));
+                }
+
+                const results = await Promise.all(promises);
+                if (results.every(r => r === false)) break;
             }
+
             return { images: allImages, videos: allVideos };
         }
 
@@ -875,6 +911,14 @@ export default defineContentScript({
             const videos: string[] = [];          // Product videos
             const reviewVideos: string[] = [];    // Customer review videos
             const listingProducts: ProductItem[] = [];
+
+            // Immediately include any prefetched review media
+            if (prefetchedReviewImages.length > 0) {
+                reviewImages.push(...prefetchedReviewImages);
+            }
+            if (prefetchedReviewVideos.length > 0) {
+                reviewVideos.push(...prefetchedReviewVideos);
+            }
 
             // Detect page type
             const onProductPage = isProductPage();
@@ -1540,23 +1584,57 @@ export default defineContentScript({
                     return false;
                 }
 
-                // 1. Extract videos from embedded script data (highest priority - available immediately)
-                // STRICT: Apply promotional content filtering to all video extraction
+                // 1. Broad-Spectrum Scanner: SCAN ALL SCRIPTS ONCE FOR MEDIA (Aggressive Discovery)
+                imageScripts.forEach(script => {
+                    const scriptContent = script.textContent || '';
+                    if (scriptContent.length < 50) return;
+
+                    const lowerScript = scriptContent.toLowerCase();
+                    if (lowerScript.includes('video') || lowerScript.includes('image') ||
+                        lowerScript.includes('media') || lowerScript.includes('gallery')) {
+
+                        // Look for any MP4, m3u8, mpd, or webm URLs
+                        const vMatch = scriptContent.match(/https?:\/\/[^"'\s,\]\[\}]+\.(mp4|m3u8|mpd|webm)[^"'\s,\]\[\}]*/gi);
+                        if (vMatch) {
+                            vMatch.forEach(vUrl => {
+                                const cleanUrl = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '');
+                                if (!isPromotionalContent(scriptContent, cleanUrl)) {
+                                    if (isReviewVideoContext(scriptContent, cleanUrl)) addReviewVideo(cleanUrl);
+                                    else if (isOfficialProductVideo(scriptContent, cleanUrl)) addProductVideo(cleanUrl);
+                                }
+                            });
+                        }
+
+                        // Look for high-res images in JSON arrays
+                        const iMatch = scriptContent.match(/https?:\/\/[^"'\s,\]\[\}]+\.(jpg|jpeg|png|webp)[^"'\s,\]\[\}]*/gi);
+                        if (iMatch) {
+                            iMatch.forEach(iUrl => {
+                                if (iUrl.includes('/images/I/') && !iUrl.includes('avatar') && !iUrl.includes('sprite')) {
+                                    const hi = toHighRes(iUrl.replace(/\\u002F/g, '/').replace(/\\/g, ''));
+                                    if (isValidImage(hi)) {
+                                        if (isCustomerReviewImage(hi, script)) addUniqueReviewImage(hi, scriptContent);
+                                        else addUniqueImage(hi);
+                                    }
+                                }
+                            });
+                        }
+                    }
+                });
+
+                // 2. Specific Pattern Extraction
                 imageScripts.forEach(script => {
                     const content = script.textContent || '';
                     if (!content || content.length < 100) return;
 
-                    // Skip scripts that contain "Similar Brands" or other promotional markers
                     const lowerContent = content.toLowerCase();
                     if (lowerContent.includes('similar brands on amazon') ||
                         lowerContent.includes('similarbrand') ||
                         lowerContent.includes('sponsored-brand')) {
                         // Still check for review videos in these blocks, but skip product videos
-                        const reviewOnlyPatterns = /"(?:customerReview|reviewVideo|ugcVideo)[^"]*"\s*:\s*"(https:\/\/[^"]+\.mp4[^"]*)"/gi;
+                        const reviewOnlyPatterns = /"(?:customerReview|reviewVideo|ugcVideo|reviewVideoUrl)[^"]*"\s*:\s*"(https:\/\/[^"]+\.mp4[^"]*)"/gi;
                         let reviewMatch;
                         while ((reviewMatch = reviewOnlyPatterns.exec(content)) !== null) {
-                            let url = reviewMatch[1].replace(/\\u002F/g, '/').replace(/\\/g, '');
-                            addReviewVideo(url);
+                            addReviewVideo(reviewMatch[1].replace(/\\u002F/g, '/').replace(/\\/g, ''));
                         }
                         return;
                     }
@@ -1889,18 +1967,14 @@ export default defineContentScript({
                     hasAutoScrolled = false;
                 }
 
-                if (onProductPage && asin && triggerScroll && !hasAutoScrolled) {
-                    // Mark as scrolled so we don't do it again for this ASIN
-                    hasAutoScrolled = true;
-                    // Trigger dynamic loads on page (scrolling)
-                    await triggerReviewMediaLoad();
-                }
+                // No longer trigger scroll - data is fetched via silent API
 
                 // Background fetch across ALL pages (limit increased significantly)
                 // runs ONCE per ASIN change, regardless of triggerScroll
                 if (onProductPage && asin && asin !== lastFetchedReviewAsin) {
                     lastFetchedReviewAsin = asin;
-                    const extra = await fetchAllReviewMedia(asin, 40);
+                    const extra = await fetchAllReviewMedia(asin, 100);
+                    let hasNewMedia = false;
                     if (extra.images.length > 0) {
                         extra.images.forEach(img => {
                             const hi = toHighRes(img);
@@ -1908,10 +1982,19 @@ export default defineContentScript({
                             if (!seenReviewBases.has(b)) {
                                 seenReviewBases.add(b);
                                 reviewImages.push(hi);
+                                hasNewMedia = true;
                             }
                         });
                     }
-                    if (extra.videos.length > 0) reviewVideos.push(...extra.videos);
+                    if (extra.videos.length > 0) {
+                        reviewVideos.push(...extra.videos);
+                        hasNewMedia = true;
+                    }
+
+                    // Notify panel that new review media was loaded
+                    if (hasNewMedia) {
+                        notifyContentChange('review_media_loaded');
+                    }
                 }
 
                 // Capture from any open modals or gallery state JSON

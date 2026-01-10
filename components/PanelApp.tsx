@@ -63,6 +63,8 @@ interface PanelAppProps {
 
 type ViewState = 'welcome' | 'login' | 'main';
 type CategoryFilter = 'all' | 'productImages' | 'reviewImages' | 'videos';
+type MainTab = 'product' | 'review';
+type SubTab = 'images' | 'videos';
 
 // ============================================
 // Design Tokens
@@ -110,6 +112,50 @@ const getMediaItems = (data: ProductData | null): MediaItem[] => {
     if (!data) return [];
 
     const items: MediaItem[] = [];
+    const seenUrls = new Set<string>();
+
+    // Helper to extract unique image ID from URL for deduplication
+    // Extracts only the core alphanumeric ID, ignoring all size/variant suffixes
+    const getImageBaseId = (url: string): string => {
+        try {
+            // Decode URL-encoded characters
+            let decoded = url;
+            try { decoded = decodeURIComponent(url); } catch { /* ignore */ }
+
+            // Remove query params and normalize
+            const cleaned = decoded.split('?')[0];
+
+            // Extract the image ID from Amazon URL pattern
+            const match = cleaned.match(/images\/I\/([A-Za-z0-9]+)/);
+            if (match) {
+                // Return only the core alphanumeric ID (typically starts with numbers/letters)
+                // This handles cases like "81abc123XYZ" from "81abc123XYZ._AC_SL1500_.jpg"
+                return match[1];
+            }
+
+            // Alternative: try to extract from filename
+            const filenameMatch = cleaned.match(/\/([A-Za-z0-9]{8,})/);
+            if (filenameMatch) {
+                return filenameMatch[1];
+            }
+
+            // Fallback: use cleaned URL
+            return cleaned;
+        } catch {
+            return url;
+        }
+    };
+
+    // Helper to add item with deduplication
+    const addItem = (url: string, type: 'image' | 'video', source: 'product' | 'review', category: MediaItem['category']) => {
+        const baseId = type === 'image' ? getImageBaseId(url) : url.split('?')[0];
+        if (!seenUrls.has(baseId)) {
+            seenUrls.add(baseId);
+            items.push({ url, type, source, category });
+        } else {
+            console.log('Pixora DEDUP: Skipped duplicate', { baseId, url, category });
+        }
+    };
 
     // Determine which product images to show
     let displayImages = data.productImages || [];
@@ -140,19 +186,19 @@ const getMediaItems = (data: ProductData | null): MediaItem[] => {
     }
 
     displayImages.forEach(url => {
-        items.push({ url, type: 'image', source: 'product', category: 'productImage' });
+        addItem(url, 'image', 'product', 'productImage');
     });
 
     (data.productVideos || data.videos || []).forEach(url => {
-        items.push({ url, type: 'video', source: 'product', category: 'productVideo' });
+        addItem(url, 'video', 'product', 'productVideo');
     });
 
     (data.reviewImages || []).forEach(url => {
-        items.push({ url, type: 'image', source: 'review', category: 'reviewImage' });
+        addItem(url, 'image', 'review', 'reviewImage');
     });
 
     (data.reviewVideos || []).forEach(url => {
-        items.push({ url, type: 'video', source: 'review', category: 'reviewVideo' });
+        addItem(url, 'video', 'review', 'reviewVideo');
     });
 
     return items;
@@ -182,6 +228,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     const [activeSearchTerm, setActiveSearchTerm] = useState('');
     const [variantDropdownOpen, setVariantDropdownOpen] = useState(false);
     const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('productImages');
+    const [mainTab, setMainTab] = useState<MainTab>('product');
+    const [subTab, setSubTab] = useState<SubTab>('images');
     const [showAllItems, setShowAllItems] = useState(false);
     const [selectingVariant, setSelectingVariant] = useState(false);
     const [variantStartIndex, setVariantStartIndex] = useState(0);
@@ -201,15 +249,28 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         return allMediaItems;
     }, [allMediaItems, categoryFilter]);
 
-    // URLs for preview navigation (same type only)
+    // URLs for preview navigation (based on current tab selection)
     const getPreviewUrls = (item: MediaItem): string[] => {
-        return filteredMediaItems.filter(i => i.type === item.type).map(i => i.url);
+        // Filter based on current mainTab and subTab
+        let currentItems: typeof allMediaItems = [];
+        if (mainTab === 'product' && subTab === 'images') {
+            currentItems = allMediaItems.filter(i => i.category === 'productImage');
+        } else if (mainTab === 'product' && subTab === 'videos') {
+            currentItems = allMediaItems.filter(i => i.category === 'productVideo');
+        } else if (mainTab === 'review' && subTab === 'images') {
+            currentItems = allMediaItems.filter(i => i.category === 'reviewImage');
+        } else if (mainTab === 'review' && subTab === 'videos') {
+            currentItems = allMediaItems.filter(i => i.category === 'reviewVideo');
+        }
+        // Filter by same media type (image/video) and return URLs
+        return currentItems.filter(i => i.type === item.type).map(i => i.url);
     };
 
     // Category counts
     const categoryCounts = useMemo(() => ({
         all: allMediaItems.length,
         productImages: allMediaItems.filter(i => i.category === 'productImage').length,
+        productVideos: allMediaItems.filter(i => i.category === 'productVideo').length,
         reviewImages: allMediaItems.filter(i => i.category === 'reviewImage').length,
         reviewVideos: allMediaItems.filter(i => i.category === 'reviewVideo').length,
         videos: allMediaItems.filter(i => i.category === 'productVideo' || i.category === 'reviewVideo').length,
@@ -540,13 +601,27 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     };
 
     const handleRefresh = () => {
+        // Reset selection state
         setSelectedItems(new Set());
         setIsSelectionMode(false);
+
+        // Reset search state
         setSearchTerm('');
         setActiveSearchTerm('');
+
+        // Reset category/tab state to initial values
         setCategoryFilter('productImages');
+        setMainTab('product');
+        setSubTab('images');
         setShowAllItems(false);
+
+        // Reset variant state completely
         setSelectedVariantAsin(null);
+        setVariantDropdownOpen(false);
+        setSelectingVariant(false);
+        setVariantStartIndex(0);
+
+        // Reload data
         loadData();
     };
 
@@ -643,56 +718,138 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         </div>
     );
 
-    // Category Tabs
-    const renderCategoryTabs = () => (
-        <div style={{
-            display: 'flex',
-            gap: '6px',
-            padding: '12px 16px',
-            background: COLORS.surface,
-            borderBottom: `1px solid ${COLORS.borderLight}`,
-            overflowX: 'auto'
-        }}>
-            {[
-                { key: 'productImages' as CategoryFilter, label: 'Product Images', count: categoryCounts.productImages },
-                { key: 'videos' as CategoryFilter, label: 'Videos', count: categoryCounts.videos },
-                { key: 'reviewImages' as CategoryFilter, label: 'Reviews', count: categoryCounts.reviewImages + categoryCounts.reviewVideos },
-            ].map(tab => (
-                <button
-                    key={tab.key}
-                    onClick={() => { setCategoryFilter(tab.key); setShowAllItems(false); }}
-                    disabled={tab.count === 0}
-                    style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '6px',
-                        padding: '8px 12px',
-                        borderRadius: '8px',
-                        border: categoryFilter === tab.key ? `1.5px solid ${COLORS.primary}` : '1.5px solid transparent',
-                        background: categoryFilter === tab.key ? COLORS.primarySoft : COLORS.background,
-                        color: categoryFilter === tab.key ? COLORS.primary : COLORS.textSecondary,
-                        fontSize: '12px',
-                        fontWeight: 600,
-                        cursor: tab.count === 0 ? 'not-allowed' : 'pointer',
-                        opacity: tab.count === 0 ? 0.4 : 1,
-                        transition: 'all 0.2s ease',
-                        whiteSpace: 'nowrap'
-                    }}
-                >
-                    {tab.label}
-                    <span style={{
-                        background: categoryFilter === tab.key ? COLORS.primary : COLORS.border,
-                        color: categoryFilter === tab.key ? '#fff' : COLORS.textMuted,
-                        padding: '2px 6px',
-                        borderRadius: '4px',
-                        fontSize: '10px'
-                    }}>
-                        {tab.count}
-                    </span>
-                </button>
-            ))}
-        </div>
-    );
+    // Two-Level Category Navigation
+    const renderCategoryTabs = () => {
+        const productTotal = categoryCounts.productImages + categoryCounts.productVideos;
+        const reviewTotal = categoryCounts.reviewImages + categoryCounts.reviewVideos;
+
+        return (
+            <div style={{
+                background: COLORS.surface,
+                borderBottom: `1px solid ${COLORS.borderLight}`,
+                padding: '0'
+            }}>
+                {/* Main Tabs: Product / Review */}
+                <div style={{
+                    display: 'flex',
+                    borderBottom: `1px solid ${COLORS.borderLight}`
+                }}>
+                    {[
+                        { key: 'product' as MainTab, label: 'Product', count: productTotal, icon: 'M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z' },
+                        { key: 'review' as MainTab, label: 'Review', count: reviewTotal, icon: 'M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z' },
+                    ].map(tab => (
+                        <button
+                            key={tab.key}
+                            onClick={() => {
+                                setMainTab(tab.key);
+                                setSubTab('images');
+                                setShowAllItems(false);
+                            }}
+                            disabled={tab.count === 0}
+                            style={{
+                                flex: 1,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: '6px',
+                                padding: '12px 8px',
+                                border: 'none',
+                                borderBottom: mainTab === tab.key ? `2.5px solid ${COLORS.primary}` : '2.5px solid transparent',
+                                background: mainTab === tab.key ? COLORS.primarySoft : 'transparent',
+                                color: mainTab === tab.key ? COLORS.primary : COLORS.textSecondary,
+                                fontSize: '12px',
+                                fontWeight: 700,
+                                cursor: tab.count === 0 ? 'not-allowed' : 'pointer',
+                                opacity: tab.count === 0 ? 0.4 : 1,
+                                transition: 'all 0.2s ease',
+                                textTransform: 'uppercase',
+                                letterSpacing: '0.5px'
+                            }}
+                        >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <path d={tab.icon} />
+                            </svg>
+                            {tab.label}
+                            <span style={{
+                                background: mainTab === tab.key ? COLORS.primary : COLORS.border,
+                                color: mainTab === tab.key ? '#fff' : COLORS.textMuted,
+                                padding: '2px 6px',
+                                borderRadius: '10px',
+                                fontSize: '9px',
+                                fontWeight: 800
+                            }}>
+                                {tab.count}
+                            </span>
+                        </button>
+                    ))}
+                </div>
+
+                {/* Sub Tabs: Images / Videos */}
+                <div style={{
+                    display: 'flex',
+                    gap: '6px',
+                    padding: '8px 12px',
+                    background: COLORS.background
+                }}>
+                    {[
+                        {
+                            key: 'images' as SubTab,
+                            label: 'Images',
+                            count: mainTab === 'product' ? categoryCounts.productImages : categoryCounts.reviewImages,
+                            icon: 'M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z'
+                        },
+                        {
+                            key: 'videos' as SubTab,
+                            label: 'Videos',
+                            count: mainTab === 'product' ? categoryCounts.productVideos : categoryCounts.reviewVideos,
+                            icon: 'M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z'
+                        },
+                    ].map(sub => (
+                        <button
+                            key={sub.key}
+                            onClick={() => {
+                                setSubTab(sub.key);
+                                setShowAllItems(false);
+                            }}
+                            disabled={sub.count === 0}
+                            style={{
+                                flex: 1,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: '5px',
+                                padding: '8px 10px',
+                                borderRadius: '8px',
+                                border: subTab === sub.key ? `1.5px solid ${COLORS.primary}` : `1.5px solid ${COLORS.border}`,
+                                background: subTab === sub.key ? COLORS.primarySoft : COLORS.surface,
+                                color: subTab === sub.key ? COLORS.primary : COLORS.textSecondary,
+                                fontSize: '11px',
+                                fontWeight: 600,
+                                cursor: sub.count === 0 ? 'not-allowed' : 'pointer',
+                                opacity: sub.count === 0 ? 0.4 : 1,
+                                transition: 'all 0.2s ease'
+                            }}
+                        >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <path d={sub.icon} />
+                            </svg>
+                            {sub.label}
+                            <span style={{
+                                background: subTab === sub.key ? COLORS.primary : COLORS.border,
+                                color: subTab === sub.key ? '#fff' : COLORS.textMuted,
+                                padding: '1px 5px',
+                                borderRadius: '6px',
+                                fontSize: '9px',
+                                fontWeight: 700
+                            }}>
+                                {sub.count}
+                            </span>
+                        </button>
+                    ))}
+                </div>
+            </div>
+        );
+    };
 
     // Variant List (Grouped Cards)
     const renderVariantList = () => {
@@ -707,7 +864,16 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
-                    marginBottom: '10px'
+                    marginBottom: '10px',
+                    position: 'sticky',
+                    top: '-14px', // Offset for container padding
+                    zIndex: 20,
+                    background: COLORS.background,
+                    padding: '8px 0',
+                    margin: '0 -14px 10px -14px',
+                    paddingLeft: '14px',
+                    paddingRight: '14px',
+                    borderBottom: `1px solid ${COLORS.borderLight}`
                 }}>
                     <span style={{
                         fontSize: '11px',
@@ -756,147 +922,195 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                     padding: '12px',
                                     borderRadius: '10px',
                                     background: isCurrent ? COLORS.primarySoft : COLORS.surface,
-                                    border: `1px solid ${isCurrent ? COLORS.primary : COLORS.border}`,
+                                    border: isCurrent ? `2px solid ${COLORS.primary}` : `1px solid ${COLORS.border}`,
                                     cursor: isUnavailable ? 'not-allowed' : selectingVariant ? 'wait' : isCurrent ? 'default' : 'pointer',
                                     // Removed opacity reduction for unavailable items
-                                    transition: 'all 0.2s ease'
+                                    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
                                 }}
                                 className={!isCurrent && !isUnavailable ? 'variant-option-hover' : ''}
                             >
                                 {/* Info */}
                                 <div style={{ width: '100%' }}>
-                                    {/* ASIN with Current indicator */}
+                                    {/* ASIN and Selected Badge */}
                                     <div style={{
-                                        fontSize: '11px',
-                                        fontWeight: 600,
-                                        color: isCurrent ? COLORS.primary : COLORS.textMuted,
-                                        marginBottom: '4px',
                                         display: 'flex',
                                         alignItems: 'center',
-                                        justifyContent: 'space-between'
+                                        justifyContent: 'flex-start',
+                                        marginBottom: '6px'
                                     }}>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                            <span>{variant.asin}</span>
-
+                                        <div style={{
+                                            fontSize: '10px',
+                                            fontWeight: 600,
+                                            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+                                            color: isCurrent ? COLORS.primary : COLORS.textMuted,
+                                            opacity: 0.8,
+                                            letterSpacing: '0.2px'
+                                        }}>
+                                            {variant.asin}
                                         </div>
-                                        {/* Unavailable badge removed */}
                                     </div>
 
-                                    {/* Variant Name */}
+                                    {/* Variant Name - Bold and prominent */}
                                     <div style={{
-                                        fontSize: '13px',
-                                        fontWeight: 600,
+                                        fontSize: '14px',
+                                        fontWeight: 700,
                                         color: COLORS.text,
-                                        lineHeight: '1.3',
-                                        marginBottom: '8px',
+                                        lineHeight: '1.25',
+                                        marginBottom: '10px',
                                         display: '-webkit-box',
                                         WebkitLineClamp: 2,
                                         WebkitBoxOrient: 'vertical',
                                         overflow: 'hidden',
-                                        height: '34px'
+                                        height: '35px'
                                     }}>
                                         {variant.name}
                                     </div>
                                 </div>
 
-                                {/* Gallery Preview (up to 2 images + counter) */}
-                                <div style={{ position: 'relative', marginTop: 'auto', width: '100%' }}>
-                                    {(variant.images && variant.images.length > 1) ? (
-                                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '4px' }}>
-                                            {variant.images.slice(0, 2).map((img, idx) => (
-                                                <div key={idx} style={{
-                                                    aspectRatio: '1',
-                                                    borderRadius: '6px',
-                                                    background: `url(${img}) center/contain no-repeat`,
-                                                    backgroundColor: '#fff',
-                                                    border: `1px solid ${COLORS.border}`,
-                                                }} />
-                                            ))}
-                                            {/* Counter or 3rd image */}
-                                            {variant.images.length > 2 && (
+                                {/* Gallery Preview (up to 2 images + counter) - ALWAYS SHOW */}
+                                {(() => {
+                                    // Build image list with fallbacks
+                                    let displayImages: string[] = variant.images || [];
+
+                                    // Fallback 1: Try variantImagesByAsin
+                                    if (displayImages.length === 0 && productData?.variantImagesByAsin?.[variant.asin]) {
+                                        displayImages = productData.variantImagesByAsin[variant.asin];
+                                    }
+
+                                    // Fallback 2: Try variantImages by name
+                                    if (displayImages.length === 0 && productData?.variantImages) {
+                                        const cleanName = variant.name.replace(/^Select\s+/, '').trim();
+                                        const matchingKey = Object.keys(productData.variantImages).find(k =>
+                                            k === cleanName || k === variant.name ||
+                                            k.toLowerCase().includes(cleanName.toLowerCase()) ||
+                                            cleanName.toLowerCase().includes(k.toLowerCase())
+                                        );
+                                        if (matchingKey) {
+                                            displayImages = productData.variantImages[matchingKey];
+                                        }
+                                    }
+
+                                    // Fallback 3: Use thumbnail as single image
+                                    if (displayImages.length === 0 && thumbnail) {
+                                        displayImages = [thumbnail];
+                                    }
+
+                                    const imageCount = displayImages.length;
+
+                                    // GUARANTEE 2 preview images: duplicate if only 1 exists
+                                    let previewImages: string[] = [];
+                                    if (imageCount >= 2) {
+                                        previewImages = displayImages.slice(0, 2);
+                                    } else if (imageCount === 1) {
+                                        // Duplicate single image to fill both slots
+                                        previewImages = [displayImages[0], displayImages[0]];
+                                    }
+
+                                    const remainingCount = imageCount > 2 ? imageCount - 2 : 0;
+
+                                    return (
+                                        <div style={{ position: 'relative', marginTop: 'auto', width: '100%' }}>
+                                            {previewImages.length >= 2 ? (
+                                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '5px' }}>
+                                                    {/* Always show 2 preview images */}
+                                                    {previewImages.map((img, idx) => (
+                                                        <div key={idx} style={{
+                                                            aspectRatio: '1',
+                                                            borderRadius: '8px',
+                                                            background: `url(${img}) center/contain no-repeat`,
+                                                            backgroundColor: '#fafafa',
+                                                            border: `1px solid rgba(0,0,0,0.06)`,
+                                                            boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.04)',
+                                                            transition: 'transform 0.2s ease, box-shadow 0.2s ease'
+                                                        }}
+                                                            className="variant-thumb"
+                                                        />
+                                                    ))}
+                                                    {/* +N counter or empty third slot */}
+                                                    {remainingCount > 0 ? (
+                                                        <div style={{
+                                                            aspectRatio: '1',
+                                                            borderRadius: '8px',
+                                                            background: 'rgba(241, 245, 249, 0.8)',
+                                                            border: `1px solid ${COLORS.border}`,
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            justifyContent: 'center',
+                                                            fontSize: '12px',
+                                                            fontWeight: 700,
+                                                            color: COLORS.textSecondary,
+                                                            boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.04)'
+                                                        }}>
+                                                            +{remainingCount}
+                                                        </div>
+                                                    ) : (
+                                                        <div style={{
+                                                            aspectRatio: '1',
+                                                            borderRadius: '8px',
+                                                            background: 'rgba(241, 245, 249, 0.5)',
+                                                            border: `1px dashed rgba(0,0,0,0.1)`,
+                                                        }} />
+                                                    )}
+                                                </div>
+                                            ) : (
+                                                /* No images at all - show placeholder */
                                                 <div style={{
-                                                    aspectRatio: '1',
-                                                    borderRadius: '6px',
+                                                    width: '100%',
+                                                    height: '60px',
+                                                    borderRadius: '8px',
                                                     background: COLORS.backgroundSecondary,
-                                                    border: `1px solid ${COLORS.border}`,
                                                     display: 'flex',
                                                     alignItems: 'center',
                                                     justifyContent: 'center',
-                                                    fontSize: '11px',
-                                                    fontWeight: 700,
-                                                    color: COLORS.textMuted
                                                 }}>
-                                                    +{variant.images.length - 2}
+                                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={COLORS.textMuted} strokeWidth="1.5">
+                                                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                                                        <circle cx="8.5" cy="8.5" r="1.5" />
+                                                        <polyline points="21 15 16 10 5 21" />
+                                                    </svg>
                                                 </div>
                                             )}
-                                        </div>
-                                    ) : thumbnail ? (
-                                        <div style={{
-                                            width: '100%',
-                                            height: '100px',
-                                            borderRadius: '8px',
-                                            background: `url(${thumbnail}) center/contain no-repeat`,
-                                            backgroundColor: '#fff',
-                                            border: `1px solid ${COLORS.border}`,
-                                        }} />
-                                    ) : (
-                                        <div style={{
-                                            width: '100%',
-                                            height: '100px',
-                                            borderRadius: '8px',
-                                            background: COLORS.backgroundSecondary,
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            justifyContent: 'center',
-                                        }}>
-                                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={COLORS.textMuted} strokeWidth="1.5">
-                                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                                                <circle cx="8.5" cy="8.5" r="1.5" />
-                                                <polyline points="21 15 16 10 5 21" />
-                                            </svg>
-                                        </div>
-                                    )}
 
-                                    {/* Download Button Overlay */}
-                                    {thumbnail && (
-                                        <button
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                if (variant.images && variant.images.length > 0) {
-                                                    const filename = `pixora-${productData?.asin || 'product'}-${variant.name.replace(/[^a-zA-Z0-9]/g, '_')}-${Date.now()}`;
-                                                    downloadZip(variant.images, filename);
-                                                } else {
-                                                    downloadSingle(thumbnail);
-                                                }
-                                            }}
-                                            className="variant-download-btn"
-                                            style={{
-                                                position: 'absolute',
-                                                bottom: '6px',
-                                                right: '6px',
-                                                width: '24px',
-                                                height: '24px',
-                                                borderRadius: '6px',
-                                                background: '#fff',
-                                                border: `1px solid ${COLORS.border}`,
-                                                display: 'flex',
-                                                alignItems: 'center',
-                                                justifyContent: 'center',
-                                                cursor: 'pointer',
-                                                boxShadow: COLORS.shadowSm,
-                                                color: COLORS.text,
-                                                transition: 'all 0.2s ease'
-                                            }}
-                                            title="Download Image"
-                                        >
-                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                                                <polyline points="7 10 12 15 17 10" />
-                                                <line x1="12" y1="15" x2="12" y2="3" />
-                                            </svg>
-                                        </button>
-                                    )}
-                                </div>
+                                            {/* Download Button Overlay */}
+                                            {imageCount > 0 && (
+                                                <button
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        if (displayImages.length > 0) {
+                                                            const filename = `pixora-${productData?.asin || 'product'}-${variant.name.replace(/[^a-zA-Z0-9]/g, '_')}-${Date.now()}`;
+                                                            downloadZip(displayImages, filename);
+                                                        }
+                                                    }}
+                                                    className="variant-download-btn"
+                                                    style={{
+                                                        position: 'absolute',
+                                                        bottom: '6px',
+                                                        right: '6px',
+                                                        width: '24px',
+                                                        height: '24px',
+                                                        borderRadius: '6px',
+                                                        background: '#fff',
+                                                        border: `1px solid ${COLORS.border}`,
+                                                        display: 'flex',
+                                                        alignItems: 'center',
+                                                        justifyContent: 'center',
+                                                        cursor: 'pointer',
+                                                        boxShadow: COLORS.shadowSm,
+                                                        color: COLORS.text,
+                                                        transition: 'all 0.2s ease'
+                                                    }}
+                                                    title={`Download ${imageCount} image${imageCount > 1 ? 's' : ''}`}
+                                                >
+                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                                        <polyline points="7 10 12 15 17 10" />
+                                                        <line x1="12" y1="15" x2="12" y2="3" />
+                                                    </svg>
+                                                </button>
+                                            )}
+                                        </div>
+                                    );
+                                })()}
                             </div>
                         );
                     })}
@@ -945,63 +1159,58 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     />
                 )}
 
-                {/* Badges */}
-                <div style={{ position: 'absolute', top: '4px', left: '4px', display: 'flex', gap: '3px' }}>
+                {/* Badges - Glassmorphic */}
+                <div style={{ position: 'absolute', top: '6px', left: '6px', display: 'flex', gap: '4px', pointerEvents: 'none' }}>
                     {isVideo && (
                         <span style={{
-                            background: 'rgba(0,0,0,0.75)',
+                            background: 'rgba(0, 0, 0, 0.45)',
+                            backdropFilter: 'blur(6px)',
+                            WebkitBackdropFilter: 'blur(6px)',
                             color: '#fff',
                             fontSize: '8px',
-                            fontWeight: 600,
-                            padding: '2px 5px',
-                            borderRadius: '3px',
+                            fontWeight: 800,
+                            padding: '3px 6px',
+                            borderRadius: '5px',
                             display: 'flex',
                             alignItems: 'center',
-                            gap: '2px'
+                            gap: '3px',
+                            border: '1px solid rgba(255, 255, 255, 0.15)',
+                            boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
                         }}>
-                            <svg width="7" height="7" viewBox="0 0 24 24" fill="currentColor">
+                            <svg width="6" height="6" viewBox="0 0 24 24" fill="currentColor">
                                 <polygon points="5 3 19 12 5 21 5 3" />
                             </svg>
                             VID
                         </span>
                     )}
-                    {isReview && (
-                        <span style={{
-                            background: COLORS.warning,
-                            color: '#fff',
-                            fontSize: '8px',
-                            fontWeight: 600,
-                            padding: '2px 5px',
-                            borderRadius: '3px'
-                        }}>
-                            REV
-                        </span>
-                    )}
                 </div>
 
-                {/* Selection Checkbox - always visible */}
+                {/* Selection Checkbox - Circular Premium */}
                 <div
                     onClick={(e) => toggleSelection(item.url, e)}
                     style={{
                         position: 'absolute',
-                        top: '4px',
-                        right: '4px',
-                        width: '20px',
-                        height: '20px',
-                        borderRadius: '6px',
-                        background: isSelected ? COLORS.primary : 'rgba(255,255,255,0.95)',
-                        border: isSelected ? 'none' : `2px solid ${COLORS.border}`,
+                        top: '6px',
+                        right: '6px',
+                        width: '22px',
+                        height: '22px',
+                        borderRadius: '50%',
+                        background: isSelected ? COLORS.primary : 'rgba(255,255,255,0.75)',
+                        backdropFilter: 'blur(4px)',
+                        WebkitBackdropFilter: 'blur(4px)',
+                        border: isSelected ? 'none' : `1.5px solid rgba(0,0,0,0.1)`,
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        boxShadow: COLORS.shadowMd,
-                        transition: 'all 0.15s ease',
+                        boxShadow: isSelected ? `0 4px 10px ${COLORS.primaryGlow}` : COLORS.shadowSm,
+                        transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
+                        transform: isSelected ? 'scale(1.1)' : 'scale(1)',
                         cursor: 'pointer',
                         zIndex: 10
                     }}
                 >
                     {isSelected && (
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round">
                             <polyline points="20 6 9 17 4 12" />
                         </svg>
                     )}
@@ -1234,36 +1443,52 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             color: COLORS.text,
             overflow: 'hidden'
         }}>
-            {/* HEADER */}
+            {/* HEADER - Glassmorphic with gradient shadow */}
             <header style={{
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
-                padding: '10px 14px',
-                background: COLORS.surface,
-                borderBottom: `1px solid ${COLORS.borderLight}`,
-                flexShrink: 0
+                padding: '12px 14px',
+                background: 'rgba(255, 255, 255, 0.92)',
+                backdropFilter: 'blur(16px)',
+                WebkitBackdropFilter: 'blur(16px)',
+                borderBottom: `1px solid rgba(0,0,0,0.05)`,
+                boxShadow: '0 4px 20px -4px rgba(0, 0, 0, 0.08)',
+                flexShrink: 0,
+                position: 'sticky',
+                top: 0,
+                zIndex: 100
             }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                     <div style={{
-                        width: '32px',
-                        height: '32px',
-                        borderRadius: '8px',
-                        background: `linear-gradient(135deg, ${COLORS.primary} 0%, #3B82F6 100%)`,
+                        width: '34px',
+                        height: '34px',
+                        borderRadius: '10px',
+                        background: `linear-gradient(135deg, ${COLORS.primary} 0%, #3B82F6 50%, #60A5FA 100%)`,
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        boxShadow: COLORS.shadowPrimary
-                    }}>
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2">
+                        boxShadow: '0 4px 12px -2px rgba(37, 99, 235, 0.4)',
+                        transition: 'transform 0.3s ease, box-shadow 0.3s ease'
+                    }} className="header-logo">
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                             <polyline points="7 10 12 15 17 10" />
                             <line x1="12" y1="15" x2="12" y2="3" />
                         </svg>
                     </div>
                     <div>
-                        <h1 style={{ fontSize: '15px', fontWeight: 700, color: COLORS.text, lineHeight: 1.1 }}>Pixora</h1>
-                        <p style={{ fontSize: '9px', color: COLORS.textMuted, fontWeight: 500 }}>Amazon Media</p>
+                        <h1 style={{
+                            fontSize: '16px',
+                            fontWeight: 800,
+                            background: 'linear-gradient(135deg, #1E40AF 0%, #2563EB 50%, #3B82F6 100%)',
+                            WebkitBackgroundClip: 'text',
+                            WebkitTextFillColor: 'transparent',
+                            backgroundClip: 'text',
+                            lineHeight: 1.1,
+                            letterSpacing: '-0.3px'
+                        }}>Pixora</h1>
+                        <p style={{ fontSize: '9px', color: COLORS.textMuted, fontWeight: 500, letterSpacing: '0.2px' }}>Amazon Media</p>
                     </div>
                 </div>
 
@@ -1271,20 +1496,22 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     <button
                         onClick={handleRefresh}
                         disabled={loading}
+                        className="refresh-btn"
                         style={{
-                            width: '32px',
-                            height: '32px',
+                            width: '34px',
+                            height: '34px',
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'center',
-                            background: COLORS.background,
-                            borderRadius: '8px',
+                            background: COLORS.surface,
+                            borderRadius: '10px',
                             color: loading ? COLORS.primary : COLORS.textSecondary,
                             border: `1px solid ${COLORS.border}`,
-                            cursor: loading ? 'not-allowed' : 'pointer'
+                            cursor: loading ? 'not-allowed' : 'pointer',
+                            transition: 'all 0.2s ease'
                         }}
                     >
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
                             style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }}>
                             <path d="M23 4v6h-6M1 20v-6h6" />
                             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
@@ -1402,29 +1629,49 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             <button
                                 onClick={downloadAll}
                                 disabled={downloading}
+                                className="download-main-btn"
                                 style={{
-                                    flex: 1, padding: '10px',
-                                    background: downloadSuccess ? COLORS.success : COLORS.primary,
-                                    border: 'none', borderRadius: '10px',
-                                    fontSize: '14px', fontWeight: 600, color: '#fff',
-                                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
-                                    boxShadow: COLORS.shadowPrimary,
-                                    cursor: downloading ? 'not-allowed' : 'pointer'
+                                    flex: 1,
+                                    padding: '14px 20px',
+                                    background: downloadSuccess
+                                        ? `linear-gradient(135deg, ${COLORS.success} 0%, #059669 100%)`
+                                        : 'linear-gradient(135deg, #2563EB 0%, #3B82F6 50%, #60A5FA 100%)',
+                                    border: 'none',
+                                    borderRadius: '14px',
+                                    fontSize: '15px',
+                                    fontWeight: 700,
+                                    color: '#fff',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    gap: '10px',
+                                    boxShadow: downloadSuccess
+                                        ? '0 8px 24px -6px rgba(16, 185, 129, 0.5)'
+                                        : '0 8px 24px -6px rgba(37, 99, 235, 0.5)',
+                                    cursor: downloading ? 'not-allowed' : 'pointer',
+                                    transition: 'all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)',
+                                    transform: downloading ? 'scale(0.98)' : 'scale(1)',
+                                    letterSpacing: '0.3px'
                                 }}
                             >
                                 {downloading ? (
                                     <>
-                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: 'spin 1s linear infinite' }}>
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: 'spin 1s linear infinite' }}>
                                             <path d="M23 4v6h-6M1 20v-6h6" />
                                             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
                                         </svg>
-                                        Downloading...
+                                        <span style={{ opacity: 0.9 }}>Downloading...</span>
                                     </>
                                 ) : downloadSuccess ? (
-                                    <>✓ Downloaded!</>
+                                    <>
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                                            <polyline points="20 6 9 17 4 12" />
+                                        </svg>
+                                        Downloaded!
+                                    </>
                                 ) : (
                                     <>
-                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                                             <polyline points="7 10 12 15 17 10" />
                                             <line x1="12" y1="15" x2="12" y2="3" />
@@ -1438,201 +1685,255 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 </div>
             )}
 
-            {/* CONTENT */}
-            <main style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden' }}>
-                {/* Content Header (Variants etc) */}
-                {!loading && hasContent && isProductPage && categoryFilter === 'productImages' && availableVariants.length > 0 && (
-                    <div style={{ padding: '14px 14px 0 14px' }}>
-                        {renderVariantList()}
-                    </div>
-                )}
-
+            {/* CONTENT - Reorganized based on two-level navigation */}
+            <main style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
                 {loading ? renderLoading() : !hasContent ? renderEmpty() : (
-                    <div style={{ padding: '14px' }}>
-                        {/* Media Grid (Product Pages) */}
+                    <>
+                        {/* MEDIA GRID SECTION */}
                         {isProductPage && (
                             <div style={{
-                                transition: 'opacity 0.4s ease-in-out',
-                                opacity: selectingVariant ? 0.5 : 1,
-                                filter: selectingVariant ? 'grayscale(0.5)' : 'none'
+                                padding: '14px',
+                                borderBottom: `1px solid ${COLORS.borderLight}`,
+                                background: COLORS.surface,
+                                flexShrink: mainTab === 'product' && subTab === 'images' ? 0 : 1,
+                                overflowY: mainTab === 'product' && subTab === 'images' ? 'visible' : 'auto'
                             }}>
-                                {/* Reviews Section - Show segregated Images and Videos */}
-                                {categoryFilter === 'reviewImages' ? (
-                                    <>
-                                        {/* Review Images Sub-section */}
-                                        {categoryCounts.reviewImages > 0 && (
-                                            <div style={{ marginBottom: '20px' }}>
-                                                <div style={{
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    gap: '8px',
-                                                    marginBottom: '10px'
-                                                }}>
-                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={COLORS.primary} strokeWidth="2">
-                                                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                                                        <circle cx="8.5" cy="8.5" r="1.5" />
-                                                        <polyline points="21 15 16 10 5 21" />
-                                                    </svg>
-                                                    <span style={{
-                                                        fontSize: '13px',
-                                                        fontWeight: 600,
-                                                        color: COLORS.text
-                                                    }}>
-                                                        Review Images
-                                                    </span>
-                                                    <span style={{
-                                                        fontSize: '11px',
-                                                        fontWeight: 600,
-                                                        color: COLORS.primary,
-                                                        background: COLORS.primarySoft,
-                                                        padding: '2px 8px',
-                                                        borderRadius: '4px'
-                                                    }}>
-                                                        {categoryCounts.reviewImages}
-                                                    </span>
-                                                </div>
+                                <div style={{
+                                    transition: 'opacity 0.4s ease-in-out',
+                                    opacity: selectingVariant ? 0.5 : 1,
+                                    filter: selectingVariant ? 'grayscale(0.5)' : 'none'
+                                }}>
+                                    {/* Get current items based on mainTab and subTab */}
+                                    {(() => {
+                                        let currentItems: typeof allMediaItems = [];
+                                        if (mainTab === 'product' && subTab === 'images') {
+                                            currentItems = allMediaItems.filter(i => i.category === 'productImage');
+                                        } else if (mainTab === 'product' && subTab === 'videos') {
+                                            currentItems = allMediaItems.filter(i => i.category === 'productVideo');
+                                        } else if (mainTab === 'review' && subTab === 'images') {
+                                            currentItems = allMediaItems.filter(i => i.category === 'reviewImage');
+                                        } else if (mainTab === 'review' && subTab === 'videos') {
+                                            currentItems = allMediaItems.filter(i => i.category === 'reviewVideo');
+                                        }
+
+                                        const itemsToShow = showAllItems ? currentItems : currentItems.slice(0, INITIAL_ITEMS_COUNT);
+                                        const hasMore = currentItems.length > INITIAL_ITEMS_COUNT;
+                                        const hiddenItems = currentItems.length - INITIAL_ITEMS_COUNT;
+
+                                        return (
+                                            <>
                                                 <div style={{
                                                     display: 'grid',
                                                     gridTemplateColumns: 'repeat(3, 1fr)',
                                                     gap: '8px'
                                                 }}>
-                                                    {allMediaItems
-                                                        .filter(i => i.category === 'reviewImage')
-                                                        .map((item, index) => renderMediaItem(item, index))}
+                                                    {itemsToShow.map((item, index) => renderMediaItem(item, index))}
                                                 </div>
-                                            </div>
-                                        )}
 
-                                        {/* Review Videos Sub-section */}
-                                        {categoryCounts.reviewVideos > 0 && (
-                                            <div>
-                                                <div style={{
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    gap: '8px',
-                                                    marginBottom: '10px'
-                                                }}>
-                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={COLORS.warning} strokeWidth="2">
-                                                        <polygon points="23 7 16 12 23 17 23 7" />
-                                                        <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
-                                                    </svg>
-                                                    <span style={{
-                                                        fontSize: '13px',
-                                                        fontWeight: 600,
-                                                        color: COLORS.text
+                                                {/* Show More Button */}
+                                                {hasMore && !showAllItems && (
+                                                    <button
+                                                        onClick={() => setShowAllItems(true)}
+                                                        style={{
+                                                            width: '100%',
+                                                            marginTop: '12px',
+                                                            padding: '10px',
+                                                            background: COLORS.background,
+                                                            border: `1px solid ${COLORS.border}`,
+                                                            borderRadius: '8px',
+                                                            fontSize: '12px',
+                                                            fontWeight: 600,
+                                                            color: COLORS.primary,
+                                                            cursor: 'pointer',
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            justifyContent: 'center',
+                                                            gap: '6px'
+                                                        }}
+                                                    >
+                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                                            <polyline points="6 9 12 15 18 9" />
+                                                        </svg>
+                                                        Show {hiddenItems} More
+                                                    </button>
+                                                )}
+
+                                                {/* Show Less Button */}
+                                                {showAllItems && hasMore && (
+                                                    <button
+                                                        onClick={() => setShowAllItems(false)}
+                                                        style={{
+                                                            width: '100%',
+                                                            marginTop: '8px',
+                                                            padding: '8px',
+                                                            background: 'transparent',
+                                                            border: 'none',
+                                                            fontSize: '11px',
+                                                            fontWeight: 500,
+                                                            color: COLORS.textMuted,
+                                                            cursor: 'pointer'
+                                                        }}
+                                                    >
+                                                        Show Less
+                                                    </button>
+                                                )}
+
+                                                {/* Empty state for current selection */}
+                                                {currentItems.length === 0 && (
+                                                    <div style={{
+                                                        padding: '40px 20px',
+                                                        textAlign: 'center',
+                                                        color: COLORS.textMuted
                                                     }}>
-                                                        Review Videos
-                                                    </span>
-                                                    <span style={{
-                                                        fontSize: '11px',
-                                                        fontWeight: 600,
-                                                        color: COLORS.warning,
-                                                        background: COLORS.warningSoft,
-                                                        padding: '2px 8px',
-                                                        borderRadius: '4px'
-                                                    }}>
-                                                        {categoryCounts.reviewVideos}
-                                                    </span>
-                                                </div>
-                                                <div style={{
-                                                    display: 'grid',
-                                                    gridTemplateColumns: 'repeat(3, 1fr)',
-                                                    gap: '8px'
-                                                }}>
-                                                    {allMediaItems
-                                                        .filter(i => i.category === 'reviewVideo')
-                                                        .map((item, index) => renderMediaItem(item, index))}
-                                                </div>
-                                            </div>
-                                        )}
-                                    </>
-                                ) : (
-                                    /* Normal Grid for Product Images and Videos tabs */
-                                    <>
-                                        <div style={{
-                                            display: 'grid',
-                                            gridTemplateColumns: 'repeat(3, 1fr)',
-                                            gap: '8px'
-                                        }}>
-                                            {displayedItems.map((item, index) => renderMediaItem(item, index))}
-                                        </div>
-
-                                        {/* Show More Button */}
-                                        {hasMoreItems && !showAllItems && (
-                                            <button
-                                                onClick={() => setShowAllItems(true)}
-                                                style={{
-                                                    width: '100%',
-                                                    marginTop: '12px',
-                                                    padding: '12px',
-                                                    background: COLORS.surface,
-                                                    border: `1px solid ${COLORS.border}`,
-                                                    borderRadius: '10px',
-                                                    fontSize: '13px',
-                                                    fontWeight: 600,
-                                                    color: COLORS.primary,
-                                                    cursor: 'pointer',
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    justifyContent: 'center',
-                                                    gap: '6px'
-                                                }}
-                                            >
-                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                                    <polyline points="6 9 12 15 18 9" />
-                                                </svg>
-                                                Show {hiddenCount} More
-                                            </button>
-                                        )}
-
-                                        {/* Show Less Button */}
-                                        {showAllItems && hasMoreItems && (
-                                            <button
-                                                onClick={() => setShowAllItems(false)}
-                                                style={{
-                                                    width: '100%',
-                                                    marginTop: '12px',
-                                                    padding: '10px',
-                                                    background: 'transparent',
-                                                    border: 'none',
-                                                    fontSize: '12px',
-                                                    fontWeight: 500,
-                                                    color: COLORS.textMuted,
-                                                    cursor: 'pointer'
-                                                }}
-                                            >
-                                                Show Less
-                                            </button>
-                                        )}
-                                    </>
-                                )}
+                                                        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ opacity: 0.4, marginBottom: '12px' }}>
+                                                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                                                            <circle cx="8.5" cy="8.5" r="1.5" />
+                                                            <polyline points="21 15 16 10 5 21" />
+                                                        </svg>
+                                                        <p style={{ fontSize: '13px', fontWeight: 500 }}>
+                                                            No {mainTab} {subTab} found
+                                                        </p>
+                                                    </div>
+                                                )}
+                                            </>
+                                        );
+                                    })()}
+                                </div>
                             </div>
+                        )}
+
+                        {/* SCROLLABLE VARIANTS SECTION - Only for Product Images */}
+                        {isProductPage && mainTab === 'product' && subTab === 'images' && availableVariants.length > 0 && (
+                            <>
+                                {/* Visual separator */}
+                                <div style={{
+                                    height: '8px',
+                                    background: `linear-gradient(to bottom, ${COLORS.surface}, ${COLORS.background})`,
+                                    borderTop: `1px solid ${COLORS.borderLight}`,
+                                    flexShrink: 0
+                                }} />
+                                <div
+                                    className="scroll-container"
+                                    style={{
+                                        flex: 1,
+                                        overflowY: 'auto',
+                                        padding: '14px',
+                                        background: COLORS.background
+                                    }}
+                                >
+                                    {renderVariantList()}
+                                </div>
+                            </>
                         )}
 
                         {/* Listing Grid */}
                         {isListingPage && (
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px' }}>
-                                {filteredListingProducts.map((product, index) => renderListingProduct(product, index))}
+                            <div style={{ flex: 1, overflowY: 'auto', padding: '14px' }}>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px' }}>
+                                    {filteredListingProducts.map((product, index) => renderListingProduct(product, index))}
+                                </div>
                             </div>
                         )}
-                    </div>
+                    </>
                 )}
             </main>
 
-            {/* GLOBAL STYLES */}
             <style>{`
+                /* Header enhancements */
+                .header-logo:hover { transform: scale(1.05) rotate(-3deg); box-shadow: 0 6px 16px -2px rgba(37, 99, 235, 0.5); }
+                .refresh-btn:hover:not(:disabled) { background: ${COLORS.primarySoft} !important; border-color: ${COLORS.primary} !important; color: ${COLORS.primary} !important; transform: scale(1.05); }
+                .refresh-btn:active:not(:disabled) { transform: scale(0.95); }
+                
+                /* Media grid with fade-in animation */
+                .media-item { 
+                    transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.3s ease, opacity 0.4s ease !important;
+                    animation: fadeInScale 0.4s ease-out backwards;
+                }
+                .media-item:nth-child(1) { animation-delay: 0.02s; }
+                .media-item:nth-child(2) { animation-delay: 0.04s; }
+                .media-item:nth-child(3) { animation-delay: 0.06s; }
+                .media-item:nth-child(4) { animation-delay: 0.08s; }
+                .media-item:nth-child(5) { animation-delay: 0.1s; }
+                .media-item:nth-child(6) { animation-delay: 0.12s; }
+                .media-item:nth-child(7) { animation-delay: 0.14s; }
+                .media-item:nth-child(8) { animation-delay: 0.16s; }
+                .media-item:nth-child(9) { animation-delay: 0.18s; }
                 .media-item:hover .media-hover-overlay { opacity: 1 !important; }
-                .media-item:hover { transform: scale(1.02); }
+                .media-item:hover { 
+                    transform: translateY(-4px) scale(1.02); 
+                    box-shadow: 0 12px 24px -10px rgba(0,0,0,0.28) !important;
+                    z-index: 5;
+                }
+                
+                /* Tab transitions */
+                .tab-indicator { transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+                
+                /* Listing products */
                 .listing-image:hover .listing-hover-overlay { opacity: 1 !important; }
-                .listing-product:hover { transform: scale(1.02); box-shadow: ${COLORS.shadowMd}; }
-                .variant-option-hover:hover { background: ${COLORS.primarySoft} !important; }
-                .variant-download-btn:hover { background: ${COLORS.primary} !important; color: #fff !important; transform: translateY(-1px); }
+                .listing-product { transition: transform 0.3s ease, box-shadow 0.3s ease; }
+                .listing-product:hover { transform: translateY(-4px); box-shadow: 0 12px 24px -8px rgba(0,0,0,0.15); }
+                
+                /* Variant cards */
+                .variant-option-hover:hover { 
+                    background: ${COLORS.primarySoft} !important; 
+                    border-color: ${COLORS.primary} !important; 
+                    transform: translateY(-3px); 
+                    box-shadow: 0 8px 20px -4px rgba(37, 99, 235, 0.25); 
+                }
+                .variant-download-btn:hover { background: ${COLORS.primary} !important; color: #fff !important; transform: translateY(-1px) scale(1.05); }
+                .variant-thumb:hover { transform: scale(1.1); box-shadow: 0 4px 12px rgba(0,0,0,0.12) !important; }
+                
+                /* Scrollbar styling */
                 .variant-scroll::-webkit-scrollbar { height: 4px; }
                 .variant-scroll::-webkit-scrollbar-track { background: transparent; }
                 .variant-scroll::-webkit-scrollbar-thumb { background: ${COLORS.border}; border-radius: 4px; }
+                .scroll-container::-webkit-scrollbar { width: 4px; }
+                .scroll-container::-webkit-scrollbar-track { background: transparent; }
+                .scroll-container::-webkit-scrollbar-thumb { background: ${COLORS.border}; border-radius: 4px; }
+                
+                /* Download button */
+                .download-main-btn { position: relative; overflow: hidden; }
+                .download-main-btn::after { 
+                    content: ''; 
+                    position: absolute; 
+                    inset: 0; 
+                    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
+                    transform: translateX(-100%);
+                }
+                .download-main-btn:hover:not(:disabled)::after { animation: shimmer 1.5s infinite; }
+                .download-main-btn:hover:not(:disabled) { transform: translateY(-2px) scale(1.01) !important; box-shadow: 0 14px 32px -8px rgba(37, 99, 235, 0.55) !important; }
+                .download-main-btn:active:not(:disabled) { transform: translateY(0) scale(0.98) !important; }
+                
+                /* Checkbox bounce on selection */
+                .checkbox-bounce { animation: checkBounce 0.4s cubic-bezier(0.34, 1.56, 0.64, 1); }
+                
+                /* Scroll fade indicators */
+                .scroll-fade-top { 
+                    position: relative;
+                }
+                .scroll-fade-top::before {
+                    content: '';
+                    position: absolute;
+                    top: 0;
+                    left: 0;
+                    right: 0;
+                    height: 20px;
+                    background: linear-gradient(to bottom, ${COLORS.background}, transparent);
+                    pointer-events: none;
+                    z-index: 10;
+                    opacity: 0;
+                    transition: opacity 0.3s ease;
+                }
+                .scroll-fade-top.scrolled::before { opacity: 1; }
+                
+                /* Animations */
                 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
                 @keyframes fadeInSlide { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+                @keyframes fadeInScale { from { opacity: 0; transform: scale(0.9); } to { opacity: 1; transform: scale(1); } }
                 @keyframes progressSlide { 0% { transform: translateX(-100%); } 100% { transform: translateX(350%); } }
+                @keyframes checkBounce { 0% { transform: scale(0.8); } 50% { transform: scale(1.2); } 100% { transform: scale(1.1); } }
+                @keyframes shimmer { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+                @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
             `}</style>
         </div>
     );
