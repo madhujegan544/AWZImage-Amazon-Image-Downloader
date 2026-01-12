@@ -98,7 +98,7 @@ const COLORS = {
     shadowPrimary: '0 4px 14px rgba(37, 99, 235, 0.25)',
 };
 
-const INITIAL_ITEMS_COUNT = 9;
+const INITIAL_ITEMS_COUNT = 6;
 
 // ============================================
 // Utility Functions
@@ -108,81 +108,124 @@ const truncateText = (text: string, maxLength: number): string => {
     return text.substring(0, maxLength).trim() + '...';
 };
 
+/**
+ * Extracts the core Amazon Image ID for robust deduplication.
+ * UNIFIED PATTERN: Only captures alphanumeric characters (the core ID).
+ * This matches content.ts and variantScraper.ts for consistent deduplication.
+ */
+const getImageId = (url: string): string => {
+    try {
+        let decoded = url;
+        try { decoded = decodeURIComponent(url); } catch { /* ignore */ }
+        const cleaned = decoded.split('?')[0];
+
+        // Capture only alphanumeric characters (stops at first non-alphanumeric)
+        const match = cleaned.match(/images\/I\/([A-Za-z0-9]+)/);
+        if (match) return match[1];
+
+        const filenameMatch = cleaned.match(/\/([A-Za-z0-9]{8,})/);
+        if (filenameMatch) return filenameMatch[1];
+
+        return cleaned;
+    } catch { return url; }
+};
+
+/**
+ * Deduplicates a list of image URLs based on their core Amazon Image ID.
+ */
+const dedupeUrls = (urls: string[]): string[] => {
+    if (!urls) return [];
+    const seen = new Set<string>();
+    const unique: string[] = [];
+
+    urls.forEach(url => {
+        if (!url) return;
+        const id = getImageId(url);
+        if (!seen.has(id)) {
+            seen.add(id);
+            unique.push(url);
+        }
+    });
+
+    return unique;
+};
+
+/**
+ * Resolves the full image list for a specific variant using tiered matching.
+ */
+const resolveVariantImages = (variant: { asin: string, name: string }, data: ProductData): string[] => {
+    let images: string[] = [];
+
+    // PRIORITY 1: Match by ASIN
+    if (data.variantImagesByAsin?.[variant.asin]) {
+        images = data.variantImagesByAsin[variant.asin];
+    }
+    // PRIORITY 2: Match by exact Name
+    else if (data.variantImages?.[variant.name]) {
+        images = data.variantImages[variant.name];
+    }
+    // PRIORITY 3: Loose name matching
+    else if (data.variantImages) {
+        const cleanName = variant.name.replace(/^Select\s+/, '').trim();
+        const matchingKey = Object.keys(data.variantImages).find(k =>
+            k === cleanName || k === variant.name ||
+            k.toLowerCase().includes(cleanName.toLowerCase()) ||
+            cleanName.toLowerCase().includes(k.toLowerCase())
+        );
+        if (matchingKey) images = data.variantImages[matchingKey];
+    }
+
+    return dedupeUrls(images);
+};
+
+/**
+ * Enriches all variant cards in the product data with their accurate image sets.
+ * This happens in the background to ensure each card is a self-contained source of truth.
+ */
+const enrichProductData = (data: ProductData | null): ProductData | null => {
+    if (!data || !data.variants) return data;
+
+    const enrichedVariants = data.variants.map(v => {
+        const images = resolveVariantImages(v, data);
+        return {
+            ...v,
+            images: images.length > 0 ? images : dedupeUrls(v.images || []),
+            // Update thumbnail if we found a better gallery
+            image: images[0] || v.image
+        };
+    });
+
+    return {
+        ...data,
+        productImages: dedupeUrls(data.productImages || []),
+        variants: enrichedVariants
+    };
+};
+
 const getMediaItems = (data: ProductData | null): MediaItem[] => {
     if (!data) return [];
 
     const items: MediaItem[] = [];
-    const seenUrls = new Set<string>();
-
-    // Helper to extract unique image ID from URL for deduplication
-    // Extracts only the core alphanumeric ID, ignoring all size/variant suffixes
-    const getImageBaseId = (url: string): string => {
-        try {
-            // Decode URL-encoded characters
-            let decoded = url;
-            try { decoded = decodeURIComponent(url); } catch { /* ignore */ }
-
-            // Remove query params and normalize
-            const cleaned = decoded.split('?')[0];
-
-            // Extract the image ID from Amazon URL pattern
-            const match = cleaned.match(/images\/I\/([A-Za-z0-9]+)/);
-            if (match) {
-                // Return only the core alphanumeric ID (typically starts with numbers/letters)
-                // This handles cases like "81abc123XYZ" from "81abc123XYZ._AC_SL1500_.jpg"
-                return match[1];
-            }
-
-            // Alternative: try to extract from filename
-            const filenameMatch = cleaned.match(/\/([A-Za-z0-9]{8,})/);
-            if (filenameMatch) {
-                return filenameMatch[1];
-            }
-
-            // Fallback: use cleaned URL
-            return cleaned;
-        } catch {
-            return url;
-        }
-    };
+    const seenIds = new Set<string>();
 
     // Helper to add item with deduplication
     const addItem = (url: string, type: 'image' | 'video', source: 'product' | 'review', category: MediaItem['category']) => {
-        const baseId = type === 'image' ? getImageBaseId(url) : url.split('?')[0];
-        if (!seenUrls.has(baseId)) {
-            seenUrls.add(baseId);
+        const id = type === 'image' ? getImageId(url) : url.split('?')[0];
+        if (!seenIds.has(id)) {
+            seenIds.add(id);
             items.push({ url, type, source, category });
-        } else {
-            console.log('Pixora DEDUP: Skipped duplicate', { baseId, url, category });
         }
     };
+
 
     // Determine which product images to show
     let displayImages = data.productImages || [];
 
-    // SMART OVERRIDE: If a variant is selected, try to use its specific image set
-    if (data.variants) {
-        const selectedVariant = data.variants.find(v => v.selected);
-        if (selectedVariant) {
-            // PRIORITY 1: Try exact match by ASIN (Gold Standard)
-            if (data.variantImagesByAsin && selectedVariant.asin && data.variantImagesByAsin[selectedVariant.asin]) {
-                displayImages = data.variantImagesByAsin[selectedVariant.asin];
-            }
-            // PRIORITY 2: Try exact match by Name
-            else if (data.variantImages && selectedVariant.name && data.variantImages[selectedVariant.name]) {
-                displayImages = data.variantImages[selectedVariant.name];
-            }
-            // PRIORITY 3: Fallback loose matching by Name
-            else if (data.variantImages && selectedVariant.name) {
-                const cleanName = selectedVariant.name.replace(/^Select\s+/, '').trim();
-                const matchingKey = Object.keys(data.variantImages).find(k =>
-                    k === cleanName || k.includes(cleanName) || cleanName.includes(k)
-                );
-                if (matchingKey) {
-                    displayImages = data.variantImages[matchingKey];
-                }
-            }
-        }
+    // SMART SOURCE: Use whichever images are stored in the SELECTED variant
+    // Each variant is now enriched with its own images background
+    const selectedVariant = data.variants?.find(v => v.selected);
+    if (selectedVariant && selectedVariant.images && selectedVariant.images.length > 0) {
+        displayImages = selectedVariant.images;
     }
 
     displayImages.forEach(url => {
@@ -203,6 +246,7 @@ const getMediaItems = (data: ProductData | null): MediaItem[] => {
 
     return items;
 };
+
 
 // ============================================
 // Main Component
@@ -302,11 +346,14 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         setLoading(true);
         setError(null);
         try {
-            const data = await scrapeProductData(triggerScroll);
-            if (data) {
-                setProductData(data);
-                if (data.activeImage) {
-                    setPreviewUrl(data.activeImage);
+            const rawData = await scrapeProductData(triggerScroll);
+            if (rawData) {
+                // Enrich all variant cards with their specific images in background
+                const enrichedData = enrichProductData(rawData);
+                setProductData(enrichedData);
+
+                if (enrichedData?.activeImage) {
+                    setPreviewUrl(enrichedData.activeImage);
                 }
             } else {
                 setError('No product data found on this page');
@@ -340,10 +387,13 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 // Poll WITHOUT triggering scroll
                 const newData = await scrapeProductData(false);
                 if (newData) {
+                    // Enrich new data consistently
+                    const enrichedNewData = enrichProductData(newData);
+
                     // Detect if product changed (different ASIN or page type)
                     const productChanged = currentAsin && (
-                        newData.asin !== currentAsin ||
-                        newData.pageType !== productData?.pageType
+                        enrichedNewData?.asin !== currentAsin ||
+                        enrichedNewData?.pageType !== productData?.pageType
                     );
 
                     if (productChanged) {
@@ -357,12 +407,12 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
                         // Brief delay to show loading state
                         setTimeout(() => {
-                            setProductData(newData);
+                            setProductData(enrichedNewData);
                             setLoading(false);
                         }, 300);
                     } else {
                         // Same product - silently update data (for variant changes, etc.)
-                        setProductData(newData);
+                        setProductData(enrichedNewData);
                     }
                 }
             } catch (err: any) {
@@ -428,7 +478,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             // Check if variant actually changed
                             const newVariant = newData.variants?.find(v => v.selected);
                             if (newVariant?.asin === asin || attempts >= maxAttempts) {
-                                setProductData(newData);
+                                setProductData(enrichProductData(newData));
                                 setSelectingVariant(false);
                                 return;
                             }
@@ -969,32 +1019,9 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
                                 {/* Gallery Preview (up to 2 images + counter) - ALWAYS SHOW */}
                                 {(() => {
-                                    // Build image list with fallbacks
-                                    let displayImages: string[] = variant.images || [];
-
-                                    // Fallback 1: Try variantImagesByAsin
-                                    if (displayImages.length === 0 && productData?.variantImagesByAsin?.[variant.asin]) {
-                                        displayImages = productData.variantImagesByAsin[variant.asin];
-                                    }
-
-                                    // Fallback 2: Try variantImages by name
-                                    if (displayImages.length === 0 && productData?.variantImages) {
-                                        const cleanName = variant.name.replace(/^Select\s+/, '').trim();
-                                        const matchingKey = Object.keys(productData.variantImages).find(k =>
-                                            k === cleanName || k === variant.name ||
-                                            k.toLowerCase().includes(cleanName.toLowerCase()) ||
-                                            cleanName.toLowerCase().includes(k.toLowerCase())
-                                        );
-                                        if (matchingKey) {
-                                            displayImages = productData.variantImages[matchingKey];
-                                        }
-                                    }
-
-                                    // Fallback 3: Use thumbnail as single image
-                                    if (displayImages.length === 0 && thumbnail) {
-                                        displayImages = [thumbnail];
-                                    }
-
+                                    // Use pre-enriched images from the variant data
+                                    // Each variant already has its full gallery fetched in background
+                                    const displayImages = variant.images || [];
                                     const imageCount = displayImages.length;
 
                                     // GUARANTEE 2 preview images: duplicate if only 1 exists
@@ -1004,9 +1031,14 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                     } else if (imageCount === 1) {
                                         // Duplicate single image to fill both slots
                                         previewImages = [displayImages[0], displayImages[0]];
+                                    } else if (imageCount === 0 && thumbnail) {
+                                        // Absolute fallback to card thumbnail
+                                        previewImages = [thumbnail, thumbnail];
                                     }
 
                                     const remainingCount = imageCount > 2 ? imageCount - 2 : 0;
+
+
 
                                     return (
                                         <div style={{ position: 'relative', marginTop: 'auto', width: '100%' }}>
@@ -1076,11 +1108,23 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                                 <button
                                                     onClick={(e) => {
                                                         e.stopPropagation();
-                                                        if (displayImages.length > 0) {
+                                                        // Prevent download if still loading variant data
+                                                        if (selectingVariant) return;
+
+                                                        // Use the variant's own enriched images (background fetched)
+                                                        const imagesToDownload = variant.images || [];
+
+                                                        if (imagesToDownload.length > 0) {
                                                             const filename = `pixora-${productData?.asin || 'product'}-${variant.name.replace(/[^a-zA-Z0-9]/g, '_')}-${Date.now()}`;
-                                                            downloadZip(displayImages, filename);
+                                                            downloadZip(imagesToDownload, filename);
                                                         }
                                                     }}
+                                                    onMouseEnter={() => {
+                                                        if (!isCurrent && !selectingVariant && !isUnavailable) {
+                                                            handleVariantSelect(variant.asin, variant.name);
+                                                        }
+                                                    }}
+                                                    disabled={selectingVariant}
                                                     className="variant-download-btn"
                                                     style={{
                                                         position: 'absolute',
@@ -1089,25 +1133,33 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                                         width: '24px',
                                                         height: '24px',
                                                         borderRadius: '6px',
-                                                        background: '#fff',
+                                                        background: selectingVariant ? COLORS.backgroundSecondary : '#fff',
                                                         border: `1px solid ${COLORS.border}`,
                                                         display: 'flex',
                                                         alignItems: 'center',
                                                         justifyContent: 'center',
-                                                        cursor: 'pointer',
+                                                        cursor: selectingVariant ? 'wait' : 'pointer',
                                                         boxShadow: COLORS.shadowSm,
-                                                        color: COLORS.text,
-                                                        transition: 'all 0.2s ease'
+                                                        color: selectingVariant ? COLORS.textMuted : COLORS.text,
+                                                        transition: 'all 0.2s ease',
+                                                        opacity: selectingVariant ? 0.7 : 1
                                                     }}
-                                                    title={`Download ${imageCount} image${imageCount > 1 ? 's' : ''}`}
+                                                    title={selectingVariant ? 'Loading variant...' : `Download ${imageCount} image${imageCount > 1 ? 's' : ''}`}
                                                 >
-                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                                                        <polyline points="7 10 12 15 17 10" />
-                                                        <line x1="12" y1="15" x2="12" y2="3" />
-                                                    </svg>
+                                                    {selectingVariant ? (
+                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: 'spin 1s linear infinite' }}>
+                                                            <path d="M21 12a9 9 0 11-6.219-8.56" />
+                                                        </svg>
+                                                    ) : (
+                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                                            <polyline points="7 10 12 15 17 10" />
+                                                            <line x1="12" y1="15" x2="12" y2="3" />
+                                                        </svg>
+                                                    )}
                                                 </button>
                                             )}
+
                                         </div>
                                     );
                                 })()}
@@ -1695,8 +1747,13 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 padding: '14px',
                                 borderBottom: `1px solid ${COLORS.borderLight}`,
                                 background: COLORS.surface,
-                                flexShrink: mainTab === 'product' && subTab === 'images' ? 0 : 1,
-                                overflowY: mainTab === 'product' && subTab === 'images' ? 'visible' : 'auto'
+                                // When expanded, allow shrinking to fit and handle scrolling
+                                flexShrink: showAllItems ? 1 : 0,
+                                overflowY: 'auto',
+                                // Max height of ~3 rows when expanded to keep variant list visible
+                                maxHeight: showAllItems ? '350px' : 'none',
+                                transition: 'all 0.3s ease-in-out',
+                                position: 'relative'
                             }}>
                                 <div style={{
                                     transition: 'opacity 0.4s ease-in-out',
@@ -1764,19 +1821,28 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                                         onClick={() => setShowAllItems(false)}
                                                         style={{
                                                             width: '100%',
-                                                            marginTop: '8px',
-                                                            padding: '8px',
-                                                            background: 'transparent',
-                                                            border: 'none',
-                                                            fontSize: '11px',
-                                                            fontWeight: 500,
-                                                            color: COLORS.textMuted,
-                                                            cursor: 'pointer'
+                                                            marginTop: '12px',
+                                                            padding: '10px',
+                                                            background: COLORS.background,
+                                                            border: `1px solid ${COLORS.border}`,
+                                                            borderRadius: '8px',
+                                                            fontSize: '12px',
+                                                            fontWeight: 600,
+                                                            color: COLORS.primary,
+                                                            cursor: 'pointer',
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            justifyContent: 'center',
+                                                            gap: '6px'
                                                         }}
                                                     >
+                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                                            <polyline points="18 15 12 9 6 15" />
+                                                        </svg>
                                                         Show Less
                                                     </button>
                                                 )}
+
 
                                                 {/* Empty state for current selection */}
                                                 {currentItems.length === 0 && (

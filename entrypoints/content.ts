@@ -631,7 +631,9 @@ export default defineContentScript({
         // =========================================================================
 
         function getImageBase(url: string): string {
-            const match = url.match(/images\/I\/([A-Za-z0-9\-_+%]+)/);
+            // UNIFIED PATTERN: Only capture alphanumeric characters (the core ID)
+            // This matches variantScraper.ts and PanelApp.tsx for consistent deduplication
+            const match = url.match(/images\/I\/([A-Za-z0-9]+)/);
             return match ? match[1] : url;
         }
 
