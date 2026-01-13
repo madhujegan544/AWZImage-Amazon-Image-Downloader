@@ -351,6 +351,10 @@ export function scrapeVariants(): VariantItem[] {
                 console.log('AMZImage DEBUG: dimensionValues found:', Object.keys(dimensionValues).length, 'ASINs');
             } catch (e) { console.warn('AMZImage: dimensionValues parse error', e); }
         }
+
+        // NOTE: We do NOT parse imageGalleryData/ImageBlockATF globally here.
+        // The colorImages parsing above already properly maps images to specific color variants.
+        // Global parsing would cause cross-contamination between variants.
     });
 
     // =========================================================================
