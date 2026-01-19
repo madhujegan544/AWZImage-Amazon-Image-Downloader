@@ -387,9 +387,10 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         p.asin?.toLowerCase().includes(activeSearchTerm.toLowerCase())
     ) || [];
 
-    // Available variants
-    const availableVariants = productData?.variants?.filter(v => v.available) || [];
-    const selectedVariantData = availableVariants.find(v => v.selected);
+    // All variants - no longer filtering by availability
+    // Users should have access to all variants for media browsing/download
+    const allVariants = productData?.variants || [];
+    const selectedVariantData = allVariants.find(v => v.selected);
 
     // ============================================
     // Data Loading
@@ -682,7 +683,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     };
 
     const downloadAllVariants = async () => {
-        if (availableVariants.length === 0) return;
+        if (allVariants.length === 0) return;
 
         setDownloading(true);
         setDownloadSuccess(false);
@@ -1923,7 +1924,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                         )}
 
                         {/* SCROLLABLE VARIANTS SECTION - Only for Product Images */}
-                        {isProductPage && mainTab === 'product' && subTab === 'images' && availableVariants.length > 0 && (
+                        {isProductPage && mainTab === 'product' && subTab === 'images' && allVariants.length > 0 && (
                             <>
                                 {/* Visual separator */}
                                 <div style={{

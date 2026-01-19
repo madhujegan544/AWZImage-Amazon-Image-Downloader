@@ -221,7 +221,7 @@ function extractJSONObject(content: string, keyName: string): string | null {
  * Main variant scraping function.
  * Extracts all product variants with their images from the current Amazon page.
  */
-export function scrapeVariants(): VariantItem[] {
+export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
     const variants: VariantItem[] = [];
     const scripts = document.querySelectorAll('script:not([src])');
 
@@ -352,9 +352,59 @@ export function scrapeVariants(): VariantItem[] {
             } catch (e) { console.warn('AMZImage: dimensionValues parse error', e); }
         }
 
-        // NOTE: We do NOT parse imageGalleryData/ImageBlockATF globally here.
-        // The colorImages parsing above already properly maps images to specific color variants.
-        // Global parsing would cause cross-contamination between variants.
+        // --- Parse imageGalleryData (Modern extraction strategy) ---
+        if (content.includes('imageGalleryData')) {
+            try {
+                // Try to extract the full imageGalleryData object
+                const igdMatch = content.match(/["']?imageGalleryData["']?\s*[:=]\s*(\[[\s\S]*?\]|\{[\s\S]*?\})(?:\s*;|\s*,|\s*\n|$)/);
+                if (igdMatch && igdMatch[1]) {
+                    const parsed = safeParseJSON<any>(igdMatch[1]);
+                    if (parsed) {
+                        if (Array.isArray(parsed)) {
+                            // Format 1: [{asin: "...", mainImages: [...]}]
+                            parsed.forEach(item => {
+                                if (item.asin) {
+                                    const urls: string[] = [];
+                                    const combined = [...(item.mainImages || []), ...(item.altImages || [])];
+                                    combined.forEach(img => {
+                                        const url = typeof img === 'string' ? img : (img.hiRes || img.large || img.url);
+                                        if (url && !url.includes('transparent-pixel')) urls.push(url);
+                                    });
+                                    if (urls.length > 0) {
+                                        asinToImages[item.asin] = [...(asinToImages[item.asin] || []), ...urls];
+                                    }
+                                }
+                            });
+                        } else {
+                            // Format 2: {"ASIN": [...]}
+                            Object.entries(parsed).forEach(([asin, data]: [string, any]) => {
+                                if (asin.match(/^[A-Z0-9]{10}$/) && Array.isArray(data)) {
+                                    const urls = data.map(img => typeof img === 'string' ? img : (img.hiRes || img.large || img.url)).filter(u => u);
+                                    asinToImages[asin] = [...(asinToImages[asin] || []), ...urls];
+                                }
+                            });
+                        }
+                    }
+                }
+            } catch (e) { }
+        }
+
+        // --- Parse ImageBlockATF (Main gallery config) ---
+        if (content.includes('ImageBlockATF')) {
+            try {
+                const atfMatch = content.match(/["']?ImageBlockATF["']?\s*[:=]\s*(\{[\s\S]*?\})(?:\s*;|\s*,|\s*\n|$)/);
+                if (atfMatch && atfMatch[1]) {
+                    const parsed = safeParseJSON<any>(atfMatch[1]);
+                    const currentAsin = document.querySelector<HTMLInputElement>('#ASIN, #asin')?.value;
+                    if (parsed && currentAsin && parsed.initial && Array.isArray(parsed.initial)) {
+                        const urls = parsed.initial.map((img: any) => img.hiRes || img.large || img.main).filter((u: string) => u);
+                        if (urls.length > 0) {
+                            asinToImages[currentAsin] = [...(asinToImages[currentAsin] || []), ...urls];
+                        }
+                    }
+                }
+            } catch (e) { }
+        }
     });
 
     // =========================================================================
@@ -468,34 +518,36 @@ export function scrapeVariants(): VariantItem[] {
     // =========================================================================
     // STEP 2.5: DOM GALLERY FALLBACK - Guarantee current product has images
     // =========================================================================
-    // If JSON parsing failed or was incomplete for the current ASIN, use DOM scrape
-    const domGalleryImages = scrapeCurrentDOMGallery();
-    if (domGalleryImages.length > 0) {
-        // Always update current ASIN with DOM gallery (most reliable for current view)
-        if (currentAsin) {
-            // Merge: DOM images + existing (avoiding duplicates)
-            const existing = asinToImages[currentAsin] || [];
-            const existingBases = new Set(existing.map(url => {
-                const match = url.match(/images\/I\/([A-Za-z0-9]+)/);
-                return match ? match[1] : url;
-            }));
+    // If JSON parsing failed or was incomplete for the current ASIN, use DOM scrape.
+    // CRITICAL: Skip if we are currently hovering a variant preview to avoid contamination.
+    const domGalleryImages = isHovering ? [] : scrapeCurrentDOMGallery();
 
-            const merged = [...existing];
-            domGalleryImages.forEach(url => {
-                const imgBase = url.match(/images\/I\/([A-Za-z0-9]+)/);
-                const base = imgBase ? imgBase[1] : url;
-                if (!existingBases.has(base)) {
-                    merged.push(url);
-                    existingBases.add(base);
-                }
-            });
+    if (domGalleryImages.length > 0 && currentAsin) {
+        // ENRICH GALLERY:
+        // Amazon's JSON data (colorImages) sometimes only contains 2-3 preview images.
+        // We merge them with images found in the DOM (#altImages) to get the FULL gallery.
+        // CRITICAL: Since isHovering is false, we know these DOM images belong to the selected variant.
+        const existing = asinToImages[currentAsin] || [];
+        const existingBases = new Set(existing.map(url => getImageCoreId(url)));
 
-            // If DOM gave us more images, use the merged set
-            if (merged.length > existing.length || existing.length === 0) {
-                asinToImages[currentAsin] = merged.length > 0 ? merged : domGalleryImages;
-                globalCache[currentAsin] = asinToImages[currentAsin];
-                console.log('AMZImage DEBUG: Current ASIN enriched via DOM:', currentAsin, 'now has', asinToImages[currentAsin].length, 'images');
+        const merged = [...existing];
+        let addedCount = 0;
+
+        domGalleryImages.forEach(url => {
+            const base = getImageCoreId(url);
+            if (!existingBases.has(base)) {
+                merged.push(url);
+                existingBases.add(base);
+                addedCount++;
             }
+        });
+
+        if (addedCount > 0 || existing.length === 0) {
+            asinToImages[currentAsin] = merged;
+            globalCache[currentAsin] = merged;
+            console.log(`AMZImage DEBUG: Current ASIN enriched via DOM (+${addedCount}):`, currentAsin, 'total:', merged.length);
+        } else {
+            console.log('AMZImage DEBUG: DOM images were already in JSON source for', currentAsin);
         }
     }
 
@@ -595,13 +647,15 @@ export function scrapeVariants(): VariantItem[] {
                 if (img) thumbnail = img.getAttribute('src') || '';
             }
 
+            // Always include variants regardless of availability
+            // Users should be able to view and download media even for unavailable variants
             variants.push({
                 asin,
                 name,
                 image: thumbnail,
                 images: finalImages,
                 selected: asin === currentAsin,
-                available: available && name.length > 0
+                available: name.length > 0 // Mark as available if we have a valid name
             });
         });
     }
@@ -644,13 +698,14 @@ export function scrapeVariants(): VariantItem[] {
 
             if (!name) return;
 
+            // Include all variants regardless of availability status
             variants.push({
                 asin,
                 name,
                 image: img?.src || '',
                 images: asinToImages[asin] || [],
                 selected: isSelected,
-                available: !isUnavailable
+                available: true // Always mark as available for user access
             });
         });
     }

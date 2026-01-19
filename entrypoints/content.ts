@@ -44,6 +44,7 @@ export default defineContentScript({
         let lastUrl = window.location.href;
         let refreshDebounceTimer: ReturnType<typeof setTimeout> | null = null;
         let navigationCheckInterval: ReturnType<typeof setInterval> | null = null;
+        let isHoveringVariant = false; // Moved to global scope for scraper access
 
         // Poll for URL/ASIN changes (handle SPA navigation)
         function startNavigationListener() {
@@ -245,19 +246,48 @@ export default defineContentScript({
             }, 300); // Debounce to avoid rapid-fire updates
         }
 
-        // Get current ASIN from URL
+        // Get current ASIN from URL or hidden input (most reliable)
         function getCurrentAsin(): string {
+            // Priority 1: Hidden ASIN input (source of truth for selected variant)
+            const asinInput = (document.getElementById('ASIN') || document.getElementById('asin')) as HTMLInputElement;
+            if (asinInput && asinInput.value) return asinInput.value;
+
+            // Priority 2: URL path
             const match = window.location.pathname.match(/\/dp\/([A-Z0-9]{10})/i) ||
                 window.location.pathname.match(/\/gp\/product\/([A-Z0-9]{10})/i) ||
                 window.location.pathname.match(/\/product-reviews\/([A-Z0-9]{10})/i);
-            return match ? match[1] : '';
+
+            if (match) return match[1];
+
+            // Priority 3: Data attribute on body or main container
+            const bodyAsin = document.body.getAttribute('data-asin');
+            if (bodyAsin) return bodyAsin;
+
+            return '';
         }
 
         // Watch for variant/image changes using MutationObserver
         function setupVariantObserver() {
+            // Track mouse interactions on twister/variants
+            const twister = document.querySelector('#twister, #variation_color_name, #variation_size_name, #variation_style_name');
+            if (twister) {
+                twister.addEventListener('mouseover', (e) => {
+                    const target = e.target as HTMLElement;
+                    if (target.closest('li[data-asin], .swatchAvailable, .imgSwatch')) {
+                        isHoveringVariant = true;
+                    }
+                }, { passive: true });
+                twister.addEventListener('mouseout', (e) => {
+                    const target = e.target as HTMLElement;
+                    if (target.closest('li[data-asin], .swatchAvailable, .imgSwatch')) {
+                        isHoveringVariant = false;
+                    }
+                }, { passive: true });
+            }
+
             // Elements to watch for changes
             const observeTargets = [
-                '#imageBlock', '#altImages', '#twister', '#landingImage',
+                '#imageBlock', '#altImages', '#twister', '#landingImage', '#ASIN',
                 '#customer-reviews', '#customerReviews', '#cm_cr-review_list', '.cr-media-gallery',
                 '[data-hook="review-image-tile"]', '.review-video-container'
             ];
@@ -266,46 +296,79 @@ export default defineContentScript({
                 let shouldNotify = false;
                 let reason = 'dom_change';
 
+                // Check ASIN first as it's the strongest indicator
+                const currentAsin = getCurrentAsin();
+                if (currentAsin && currentAsin !== lastAsin) {
+                    console.log('AMZImage: ASIN changed from', lastAsin, 'to', currentAsin);
+                    lastAsin = currentAsin;
+                    lastMainImageSrc = ''; // Force image refresh detection for the new ASIN
+                    shouldNotify = true;
+                    reason = 'asin_changed';
+                }
+
                 for (const mutation of mutations) {
-                    // Check for main image source change
+                    if (shouldNotify) break; // Already decided to notify
+
+                    // Check for main image source change (Landing Image)
                     if (mutation.type === 'attributes' && mutation.attributeName === 'src') {
                         const target = mutation.target as HTMLImageElement;
                         if (target.id === 'landingImage' || target.closest('#landingImage')) {
                             const newSrc = target.src;
                             if (newSrc && newSrc !== lastMainImageSrc && !newSrc.includes('data:')) {
-                                lastMainImageSrc = newSrc;
-                                shouldNotify = true;
-                                reason = 'variant_image_changed';
+                                // CRITICAL: Ignore image changes if we are hovering (preview mode)
+                                // OR if the ASIN hasn't changed (standard thumbnail click)
+                                // Unless the ASIN actually changed, we don't want to re-scrape everything on hover.
+                                if (!isHoveringVariant && currentAsin === lastAsin) {
+                                    // This might be a manual thumbnail click within the same variant
+                                    lastMainImageSrc = newSrc;
+                                    shouldNotify = true;
+                                    reason = 'image_selection_changed';
+                                } else if (currentAsin !== lastAsin) {
+                                    // Fallback for when ASIN change wasn't detected yet
+                                    lastAsin = currentAsin;
+                                    lastMainImageSrc = newSrc;
+                                    shouldNotify = true;
+                                    reason = 'variant_image_changed';
+                                }
                             }
                         }
                     }
 
-                    // Check for data-a-dynamic-image attribute change (high-res images)
-                    if (mutation.type === 'attributes' && mutation.attributeName === 'data-a-dynamic-image') {
-                        shouldNotify = true;
-                        reason = 'dynamic_image_updated';
-                    }
-
-                    // Check for class changes (variant selection changes)
-                    if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
-                        const target = mutation.target as HTMLElement;
-                        // Check if this is a variant swatch selection
-                        if (target.closest('#twister') ||
-                            target.closest('[id*="variation_"]') ||
-                            target.classList.contains('swatchSelect') ||
-                            target.classList.contains('selected')) {
+                    // Check for value change on hidden ASIN input
+                    if (mutation.type === 'attributes' && mutation.attributeName === 'value' && (mutation.target as HTMLElement).id === 'ASIN') {
+                        const newAsin = (mutation.target as HTMLInputElement).value;
+                        if (newAsin && newAsin !== lastAsin) {
+                            lastAsin = newAsin;
                             shouldNotify = true;
-                            reason = 'variant_selection_changed';
+                            reason = 'asin_input_changed';
                         }
                     }
 
-                    // Check for new image nodes added
+                    // Check for class changes (permanent variant selection changes)
+                    if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+                        const target = mutation.target as HTMLElement;
+                        // Only trigger if it's a permanent selection class, not a hover class
+                        if (target.classList.contains('swatchSelect') ||
+                            target.classList.contains('selected') ||
+                            target.getAttribute('aria-selected') === 'true' ||
+                            target.getAttribute('aria-checked') === 'true') {
+
+                            // Verify it's in a variant container
+                            if (target.closest('#twister') || target.closest('[id*="variation_"]')) {
+                                shouldNotify = true;
+                                reason = 'variant_permanently_selected';
+                            }
+                        }
+                    }
+
+                    // Check for new image nodes added (lazy loading review images, etc.)
                     if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
                         mutation.addedNodes.forEach((node) => {
                             if (node instanceof HTMLElement) {
-                                if (node.tagName === 'IMG' || node.querySelector('img')) {
+                                // Only notify for new review/gallery images, not variant previews
+                                if (!node.closest('#twister') && (node.tagName === 'IMG' || node.querySelector('img'))) {
                                     shouldNotify = true;
-                                    reason = 'new_images_loaded';
+                                    reason = 'new_media_loaded';
                                 }
                             }
                         });
@@ -983,7 +1046,7 @@ export default defineContentScript({
 
             if (onProductPage) {
                 // scrapeVariants returns VariantItem[] directly
-                const scrapedVariants = scrapeVariants();
+                const scrapedVariants = scrapeVariants(isHoveringVariant);
                 variants = scrapedVariants;
 
                 // Reconstruct maps from the variants array
@@ -1079,90 +1142,21 @@ export default defineContentScript({
 
                 if (foundVariantImages) {
                     console.log(`AMZImage: Populated main gallery from selected variant (${productImages.length} images).`);
-                } else {
-                    // Fallback: If for some reason we missed the variant images (or it's a single product),
-                    // try the standard fallback methods.
-
-                    // 2. Extract from data-a-dynamic-image attribute on main image
-                    const mainImg = document.querySelector<HTMLImageElement>(
-                        '#landingImage, #imgBlkFront, #main-image, #ebooksImgBlkFront'
-                    );
-                    if (mainImg) {
-                        // Add main image src
-                        if (mainImg.src) {
-                            addUniqueImage(mainImg.src);
-                        }
-
-                        // Parse data-a-dynamic-image JSON for high-res versions
-                        const dynamicImageData = mainImg.getAttribute('data-a-dynamic-image');
-                        if (dynamicImageData) {
-                            try {
-                                const dynamicImages = JSON.parse(dynamicImageData);
-                                const urls = Object.keys(dynamicImages);
-                                const sorted = urls.sort((a, b) => {
-                                    const [w1, h1] = dynamicImages[a] || [0, 0];
-                                    const [w2, h2] = dynamicImages[b] || [0, 0];
-                                    return (w2 * h2) - (w1 * h1);
-                                });
-                                if (sorted.length > 0) {
-                                    addUniqueImage(sorted[0]);
-                                }
-                            } catch (e) {
-                                console.error('Failed to parse dynamic images', e);
-                            }
-                        }
-                    }
-
-                    // 3. Extract from altImages thumbnails
-                    const thumbItems = document.querySelectorAll('#altImages .a-spacing-small.item, #altImages li.a-declarative');
-                    thumbItems.forEach((item) => {
-                        if (item.classList.contains('videoThumbnail') || item.querySelector('.videoThumbnail')) return;
-                        const img = item.querySelector<HTMLImageElement>('img');
-                        if (!img) return;
-
-                        let hiResUrl = img.getAttribute('data-old-hires') || '';
-                        if (!hiResUrl && img.src) {
-                            hiResUrl = toHighRes(img.src);
-                        }
-                        if (hiResUrl) {
-                            addUniqueImage(hiResUrl);
-                        }
-                    });
-
-                    // 4. Extract from carousels (data-a-carousel-options)
-                    const carousels = document.querySelectorAll('[data-a-carousel-options]');
-                    carousels.forEach(carousel => {
-                        const options = carousel.getAttribute('data-a-carousel-options');
-                        if (options) {
-                            const urls = options.match(/https?:\/\/[^\"\'\s,\]]+\.(jpg|jpeg|png|webp)[^\"\'\s,\]]*/gi);
-                            if (urls) urls.forEach(url => addUniqueImage(url));
-                        }
-                    });
-
-                    // 5. Extract from image block wrapper spans
-                    const imageWrappers = document.querySelectorAll('#imageBlock_feature_div [data-action="main-image-click"]');
-                    imageWrappers.forEach((wrapper) => {
-                        const img = wrapper.querySelector<HTMLImageElement>('img');
-                        if (img?.src) {
-                            addUniqueImage(img.src);
-                        }
-                    });
                 }
+
+                // Discovery Enrichment: DISABLED to prevent variant image bleed
+                // The scrapeVariants() function now handles ALL product image extraction
+                // from the colorImages JSON, which provides accurate per-variant data.
+                // DO NOT add fallback DOM scraping here as it causes contamination
+                // from preview images, thumbnails, and other variants.
 
                 // 5. Variant/Swatch Images - EXCLUDED to prevent bleed-over
                 // We only want images mapping to the selected variant, not the option icons themselves
-                /*
-                const variantElements = document.querySelectorAll(
-                    '#variation_color_name li img, #variation_style_name li img, ' +
-                    '.swatchAvailable img, .imgSwatch img, [data-dp-url] img'
-                );
-                variantElements.forEach((img: Element) => {
-                    const imgEl = img as HTMLImageElement;
-                    if (imgEl.src) {
-                        addUniqueImage(imgEl.src);
-                    }
-                });
-                */
+
+
+                // 6. Support for imageGalleryData / ImageBlockATF meta (Now handled by scrapeVariants)
+                // We no longer scan globally here as it causes bleed-over.
+                // Images from these scripts are now accurately mapped to ASINs in variantScraper.ts.
 
                 console.log(`AMZImage: Found ${productImages.length} unique product images`);
 
@@ -1885,8 +1879,20 @@ export default defineContentScript({
                             el.getAttribute('data-vse-video-url') ||
                             el.getAttribute('data-vse-video-progressive-url') ||
                             el.closest('.vse-video-item')?.getAttribute('data-video-url');
+
                         if (videoUrl && videoUrl.startsWith('http')) {
                             addProductVideo(videoUrl);
+                        } else {
+                            // Support for encoded video JSON in thumbnails
+                            const videoData = el.getAttribute('data-a-video-data') ||
+                                el.querySelector('[data-a-video-data]')?.getAttribute('data-a-video-data');
+                            if (videoData) {
+                                try {
+                                    const parsed = JSON.parse(videoData);
+                                    const url = parsed.url || parsed.videoUrl || (parsed.sources && parsed.sources[0]?.url);
+                                    if (url && url.startsWith('http')) addProductVideo(url);
+                                } catch (e) { }
+                            }
                         }
                     });
 
