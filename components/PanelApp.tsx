@@ -1823,11 +1823,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 padding: '14px',
                                 borderBottom: `1px solid ${COLORS.borderLight}`,
                                 background: COLORS.surface,
-                                // When expanded, allow shrinking to fit and handle scrolling
-                                flexShrink: showAllItems ? 1 : 0,
-                                overflowY: 'auto',
-                                // Max height of ~3 rows when expanded to keep variant list visible
-                                maxHeight: showAllItems ? '350px' : 'none',
+                                // Don't cap height when expanded, cap it when collapsed to ensure variant list is visible
+                                maxHeight: showAllItems ? 'none' : '350px',
                                 transition: 'all 0.3s ease-in-out',
                                 position: 'relative'
                             }}>
