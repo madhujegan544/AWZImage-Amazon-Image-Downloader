@@ -390,20 +390,112 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
         }
 
         // --- Parse ImageBlockATF (Main gallery config) ---
+        // Amazon's ImageBlockATF contains the complete gallery for the selected variant
+        // Structure: P.when('A').register("ImageBlockATF", function(A){ var data = {...}; return data; });
+        // The data contains: { 'colorImages': { 'initial': [...all images...] }, ... }
         if (content.includes('ImageBlockATF')) {
             try {
-                const atfMatch = content.match(/["']?ImageBlockATF["']?\s*[:=]\s*(\{[\s\S]*?\})(?:\s*;|\s*,|\s*\n|$)/);
-                if (atfMatch && atfMatch[1]) {
-                    const parsed = safeParseJSON<any>(atfMatch[1]);
-                    const currentAsin = document.querySelector<HTMLInputElement>('#ASIN, #asin')?.value;
-                    if (parsed && currentAsin && parsed.initial && Array.isArray(parsed.initial)) {
-                        const urls = parsed.initial.map((img: any) => img.hiRes || img.large || img.main).filter((u: string) => u);
+                const currentAsin = document.querySelector<HTMLInputElement>('#ASIN, #asin')?.value;
+                if (!currentAsin) {
+                    console.log('AMZImage DEBUG: ImageBlockATF found but no current ASIN');
+                }
+
+                // Strategy 1: Extract colorImages.initial directly from the data block
+                // Pattern: 'colorImages': { 'initial': [{...}, {...}] }
+                const colorImagesInitialMatch = content.match(/['"]?colorImages['"]?\s*:\s*\{\s*['"]?initial['"]?\s*:\s*(\[[^\]]*(?:\{[^}]*\}[^\]]*)*\])/);
+                if (colorImagesInitialMatch && colorImagesInitialMatch[1] && currentAsin) {
+                    try {
+                        // The extracted string may be complex, try direct JSON parse
+                        const imagesArrayStr = colorImagesInitialMatch[1];
+                        const parsed = safeParseJSON<any[]>(imagesArrayStr);
+
+                        if (parsed && Array.isArray(parsed)) {
+                            const urls: string[] = [];
+                            const seenCoreIds = new Set<string>();
+
+                            parsed.forEach((img: any) => {
+                                // Extract hiRes (highest quality), falling back to large, then main object's first value
+                                let url = img.hiRes || img.large;
+                                if (!url && img.main) {
+                                    if (typeof img.main === 'string') {
+                                        url = img.main;
+                                    } else if (typeof img.main === 'object') {
+                                        // main is an object like {"url1": [w,h], "url2": [w,h]}, get highest res
+                                        const mainUrls = Object.keys(img.main);
+                                        if (mainUrls.length > 0) {
+                                            // Sort by resolution (width*height) and pick largest
+                                            url = mainUrls.sort((a, b) => {
+                                                const [w1, h1] = img.main[a] || [0, 0];
+                                                const [w2, h2] = img.main[b] || [0, 0];
+                                                return (w2 * h2) - (w1 * h1);
+                                            })[0];
+                                        }
+                                    }
+                                }
+
+                                if (url && !url.includes('transparent-pixel')) {
+                                    const coreId = getImageCoreId(url);
+                                    if (!seenCoreIds.has(coreId)) {
+                                        seenCoreIds.add(coreId);
+                                        urls.push(url);
+                                    }
+                                }
+                            });
+
+                            if (urls.length > 0) {
+                                asinToImages[currentAsin] = [...(asinToImages[currentAsin] || []), ...urls];
+                                console.log(`AMZImage DEBUG: ImageBlockATF colorImages.initial parsed: ${urls.length} images for ASIN ${currentAsin}`);
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('AMZImage DEBUG: Failed to parse colorImages.initial JSON', e);
+                    }
+                }
+
+                // Strategy 2: Extract all hiRes URLs from ImageBlockATF data block as fallback
+                // This catches any images that might be in different structures
+                if (currentAsin && (!asinToImages[currentAsin] || asinToImages[currentAsin].length === 0)) {
+                    const hiResUrls = content.match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/g);
+                    if (hiResUrls && currentAsin) {
+                        const urls: string[] = [];
+                        const seenCoreIds = new Set<string>();
+
+                        hiResUrls.forEach(match => {
+                            const urlMatch = match.match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/);
+                            if (urlMatch && urlMatch[1]) {
+                                const url = urlMatch[1];
+                                if (!url.includes('transparent-pixel')) {
+                                    const coreId = getImageCoreId(url);
+                                    if (!seenCoreIds.has(coreId)) {
+                                        seenCoreIds.add(coreId);
+                                        urls.push(url);
+                                    }
+                                }
+                            }
+                        });
+
                         if (urls.length > 0) {
                             asinToImages[currentAsin] = [...(asinToImages[currentAsin] || []), ...urls];
+                            console.log(`AMZImage DEBUG: ImageBlockATF hiRes fallback: ${urls.length} images for ASIN ${currentAsin}`);
                         }
                     }
                 }
-            } catch (e) { }
+
+                // Strategy 3: Legacy pattern - extract from parsed.initial array (kept for backwards compatibility)
+                const atfMatch = content.match(/['"]?ImageBlockATF['"]?\s*[:=]\s*(\{[\s\S]*?\})(?:\s*;|\s*,|\s*\n|$)/);
+                if (atfMatch && atfMatch[1]) {
+                    const parsed = safeParseJSON<any>(atfMatch[1]);
+                    if (parsed && currentAsin && parsed.initial && Array.isArray(parsed.initial)) {
+                        const urls = parsed.initial.map((img: any) => img.hiRes || img.large || img.main).filter((u: string) => u && typeof u === 'string');
+                        if (urls.length > 0 && (!asinToImages[currentAsin] || asinToImages[currentAsin].length === 0)) {
+                            asinToImages[currentAsin] = [...(asinToImages[currentAsin] || []), ...urls];
+                            console.log(`AMZImage DEBUG: ImageBlockATF legacy pattern: ${urls.length} images`);
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn('AMZImage DEBUG: ImageBlockATF parsing error', e);
+            }
         }
     });
 
