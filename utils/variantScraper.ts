@@ -30,15 +30,33 @@ interface ColorImageEntry {
 /**
  * Extracts high-resolution image URL from an image entry object.
  */
-function extractImageUrl(entry: ColorImageEntry): string {
+function extractImageUrl(entry: any): string {
+    if (!entry) return '';
+
+    // Priority 1: hiRes or large
     if (entry.hiRes) return entry.hiRes;
     if (entry.large) return entry.large;
-    if (typeof entry.main === 'string') return entry.main;
-    if (typeof entry.main === 'object' && entry.main) {
-        const values = Object.values(entry.main);
-        if (values.length > 0) return values[0];
+
+    // Priority 2: handle 'main' object or string
+    if (entry.main) {
+        if (typeof entry.main === 'string') return entry.main;
+        if (typeof entry.main === 'object') {
+            const urls = Object.keys(entry.main);
+            if (urls.length > 0) {
+                // Sort by resolution (width*height) and pick largest
+                return urls.sort((a, b) => {
+                    const resA = entry.main[a];
+                    const resB = entry.main[b];
+                    const areaA = Array.isArray(resA) && resA.length >= 2 ? Number(resA[0]) * Number(resA[1]) : 0;
+                    const areaB = Array.isArray(resB) && resB.length >= 2 ? Number(resB[0]) * Number(resB[1]) : 0;
+                    return areaB - areaA;
+                })[0];
+            }
+        }
     }
-    return '';
+
+    // Priority 3: any URL field
+    return entry.url || '';
 }
 
 /**
@@ -441,6 +459,77 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
             } catch (e) { }
         }
 
+        // --- Parse jQuery.parseJSON configuration (Complete variant data) ---
+        // Amazon sometimes embeds a full configuration object in jQuery.parseJSON calls
+        // This contains colorToAsin, colorImages with full galleries per color, and landingAsinColor
+        if (content.includes('jQuery.parseJSON') && content.includes('colorImages')) {
+            try {
+                // Extract the JSON string from jQuery.parseJSON('...')
+                const jsonMatch = content.match(/jQuery\.parseJSON\s*\(\s*'(\{[^']*colorImages[^']*\})'\s*\)/);
+                if (jsonMatch && jsonMatch[1]) {
+                    // Unescape the JSON string
+                    const jsonStr = jsonMatch[1]
+                        .replace(/\\'/g, "'")
+                        .replace(/\\"/g, '"')
+                        .replace(/\\\\/g, '\\');
+
+                    const parsed = safeParseJSON<any>(jsonStr);
+                    if (parsed) {
+                        // Extract colorToAsin if present and we haven't found it yet
+                        if (parsed.colorToAsin && Object.keys(colorToAsin).length === 0) {
+                            Object.entries(parsed.colorToAsin).forEach(([colorName, value]: [string, any]) => {
+                                const asin = typeof value === 'string' ? value : value?.asin;
+                                if (asin) {
+                                    colorToAsin[colorName] = asin;
+                                }
+                            });
+                            console.log(`AMZImage DEBUG: jQuery.parseJSON colorToAsin: ${Object.keys(colorToAsin).length} entries`);
+                        }
+
+                        // Extract colorImages if present
+                        if (parsed.colorImages && Object.keys(colorImages).length === 0) {
+                            Object.entries(parsed.colorImages).forEach(([colorName, entries]: [string, any]) => {
+                                if (Array.isArray(entries)) {
+                                    const urls: string[] = [];
+                                    const seenCoreIds = new Set<string>();
+                                    entries.forEach((entry: any) => {
+                                        const url = extractImageUrl(entry);
+                                        if (url && !url.includes('transparent-pixel')) {
+                                            const coreId = getImageCoreId(url);
+                                            if (!seenCoreIds.has(coreId)) {
+                                                seenCoreIds.add(coreId);
+                                                urls.push(url);
+                                            }
+                                        }
+                                    });
+                                    if (urls.length > 0) colorImages[colorName] = urls;
+                                }
+                            });
+                            console.log(`AMZImage DEBUG: jQuery.parseJSON colorImages: ${Object.keys(colorImages).length} colors`);
+                        }
+
+                        // Extract landingAsinColor to identify the current variant
+                        // Map this color to the current page's images
+                        if (parsed.landingAsinColor) {
+                            const landingColor = parsed.landingAsinColor;
+                            const currentAsin = document.querySelector<HTMLInputElement>('#ASIN, #asin')?.value;
+
+                            // If we have this color in colorImages, map it to current ASIN
+                            if (currentAsin && colorImages[landingColor] && colorImages[landingColor].length > 0) {
+                                // Ensure we don't overwrite if we already have more images
+                                if (!asinToImages[currentAsin] || asinToImages[currentAsin].length < colorImages[landingColor].length) {
+                                    asinToImages[currentAsin] = colorImages[landingColor];
+                                    console.log(`AMZImage DEBUG: Mapped landingAsinColor "${landingColor}" to ASIN ${currentAsin} (${colorImages[landingColor].length} images)`);
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn('AMZImage DEBUG: jQuery.parseJSON parsing error', e);
+            }
+        }
+
         // --- Parse ImageBlockATF (Main gallery config) ---
         // Amazon's ImageBlockATF contains the complete gallery for the selected variant
         // Structure: P.when('A').register("ImageBlockATF", function(A){ var data = {...}; return data; });
@@ -466,25 +555,7 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
                             const seenCoreIds = new Set<string>();
 
                             parsed.forEach((img: any) => {
-                                // Extract hiRes (highest quality), falling back to large, then main object's first value
-                                let url = img.hiRes || img.large;
-                                if (!url && img.main) {
-                                    if (typeof img.main === 'string') {
-                                        url = img.main;
-                                    } else if (typeof img.main === 'object') {
-                                        // main is an object like {"url1": [w,h], "url2": [w,h]}, get highest res
-                                        const mainUrls = Object.keys(img.main);
-                                        if (mainUrls.length > 0) {
-                                            // Sort by resolution (width*height) and pick largest
-                                            url = mainUrls.sort((a, b) => {
-                                                const [w1, h1] = img.main[a] || [0, 0];
-                                                const [w2, h2] = img.main[b] || [0, 0];
-                                                return (w2 * h2) - (w1 * h1);
-                                            })[0];
-                                        }
-                                    }
-                                }
-
+                                const url = extractImageUrl(img);
                                 if (url && !url.includes('transparent-pixel')) {
                                     const coreId = getImageCoreId(url);
                                     if (!seenCoreIds.has(coreId)) {
@@ -507,13 +578,15 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
                 // Strategy 2: Extract all hiRes URLs from ImageBlockATF data block as fallback
                 // This catches any images that might be in different structures
                 if (currentAsin && (!asinToImages[currentAsin] || asinToImages[currentAsin].length === 0)) {
-                    const hiResUrls = content.match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/g);
-                    if (hiResUrls && currentAsin) {
+                    // Match both hiRes and large URLs in the ImageBlockATF data block
+                    const urlPattern = /"(?:hiRes|large)"\s*:\s*"(https:\/\/[^"]+)"/g;
+                    const matches = content.match(urlPattern);
+                    if (matches && currentAsin) {
                         const urls: string[] = [];
                         const seenCoreIds = new Set<string>();
 
-                        hiResUrls.forEach(match => {
-                            const urlMatch = match.match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/);
+                        matches.forEach(match => {
+                            const urlMatch = match.match(/"(?:hiRes|large)"\s*:\s*"(https:\/\/[^"]+)"/);
                             if (urlMatch && urlMatch[1]) {
                                 const url = urlMatch[1];
                                 if (!url.includes('transparent-pixel')) {
