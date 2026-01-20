@@ -1037,7 +1037,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             <div
                                 key={variant.asin}
                                 onClick={() => {
-                                    if (!isCurrent && !selectingVariant && !isUnavailable) {
+                                    // Allow clicking ALL variants (including unavailable) to view/download media
+                                    if (!isCurrent && !selectingVariant) {
                                         handleVariantSelect(variant.asin, variant.name);
                                     }
                                 }}
@@ -1049,11 +1050,10 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                     borderRadius: '10px',
                                     background: isCurrent ? COLORS.primarySoft : COLORS.surface,
                                     border: isCurrent ? `2px solid ${COLORS.primary}` : `1px solid ${COLORS.border}`,
-                                    cursor: isUnavailable ? 'not-allowed' : selectingVariant ? 'wait' : isCurrent ? 'default' : 'pointer',
-                                    // Removed opacity reduction for unavailable items
+                                    cursor: selectingVariant ? 'wait' : isCurrent ? 'default' : 'pointer',
                                     transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
                                 }}
-                                className={!isCurrent && !isUnavailable ? 'variant-option-hover' : ''}
+                                className={!isCurrent ? 'variant-option-hover' : ''}
                             >
                                 {/* Info */}
                                 <div style={{ width: '100%' }}>

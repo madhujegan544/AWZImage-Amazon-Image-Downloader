@@ -488,12 +488,17 @@ export default defineContentScript({
             if (message.type === 'SELECT_VARIANT') {
                 try {
                     const asin = message.asin;
-                    // Try multiple selectors to find the variant on page
+                    // Try multiple selectors to find the variant on page (including unavailable ones)
                     const selectors = [
                         `li[data-defaultasin="${asin}"]`,
                         `li[data-asin="${asin}"]`,
                         `div[data-asin="${asin}"]`,
-                        `span[data-asin="${asin}"] .a-button-input`
+                        `span[data-asin="${asin}"] .a-button-input`,
+                        // Additional selectors for unavailable/out-of-stock variants
+                        `li[data-defaultasin="${asin}"].swatchUnavailable`,
+                        `li[data-asin="${asin}"].swatchUnavailable`,
+                        `[data-defaultasin="${asin}"]`,
+                        `[id*="${asin}"]`
                     ];
 
                     let target: HTMLElement | null = null;
@@ -519,10 +524,11 @@ export default defineContentScript({
                         }
                         sendResponse({ success: true });
                     } else {
-                        // Fallback: If not found in DOM, maybe reload page with new ASIN
-                        // But usually twisty is present.
-                        console.warn('Variant element not found for ASIN:', asin);
-                        sendResponse({ success: false });
+                        // Fallback: Navigate directly to the product page for this ASIN
+                        // This handles out-of-stock variants that aren't clickable
+                        console.warn('Variant element not found for ASIN, navigating to product page:', asin);
+                        window.location.href = `/dp/${asin}`;
+                        sendResponse({ success: true });
                     }
                 } catch (e) {
                     console.error("Error selecting variant", e);

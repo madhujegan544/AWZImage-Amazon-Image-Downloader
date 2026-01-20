@@ -99,7 +99,8 @@ function scrapeCurrentDOMGallery(): string[] {
         const lower = url.toLowerCase();
         if (lower.includes('.svg') || lower.includes('sprite') || lower.includes('transparent') ||
             lower.includes('pixel') || lower.includes('placeholder') || lower.includes('icon') ||
-            lower.includes('logo') || lower.includes('play-button') || lower.includes('zoom')) {
+            lower.includes('logo') || lower.includes('play-button') || lower.includes('zoom') ||
+            lower.includes('review') || lower.includes('customer') || lower.includes('user-media')) {
             return false;
         }
         return true;
@@ -179,11 +180,52 @@ function scrapeCurrentDOMGallery(): string[] {
         }
     }
 
-    // 3. Image gallery data from scripts (data-a-image-source or similar attributes)
-    const galleryItems = document.querySelectorAll('[data-a-image-source], .imageThumbnail');
+    // 3. Image gallery data from scripts and lazy-loaders
+    // RESTRICTED SCOPE: We must be very careful not to grab review images or ads.
+    const galleryItems = document.querySelectorAll('[data-a-image-source], .imageThumbnail, .lazy, [data-lazy-src], [data-src]');
+
+    // Selectors for elements we definitively do NOT want
+    const excludedContainers = [
+        '#customer-reviews',
+        '#reviews-medley-footer',
+        '#aplus',
+        '.aplus-v2',
+        '#service-capabilities',
+        '.askDetailPageWidget',
+        '#similarities_feature_div',
+        '#sponsoredProducts',
+        '.ad-holder',
+        '.review-image-tile',
+        '#vse-related-videos',
+        '.cr-media-gallery',
+        '[data-hook="review-image-tile"]'
+    ];
+
     galleryItems.forEach(item => {
-        const src = item.getAttribute('data-a-image-source');
-        if (isValid(src)) {
+        // STRICT FILTER: If the item is inside any excluded container, skip it immediately
+        if (excludedContainers.some(selector => item.closest(selector))) {
+            return;
+        }
+
+        // Additional safeguard: verify it's likely within a product image-related area
+        // if it doesn't have an obvious "gallery" attribute
+        const isExplicitGalleryItem = item.hasAttribute('data-a-image-source') || item.classList.contains('imageThumbnail');
+        if (!isExplicitGalleryItem) {
+            // If it's just a generic lazy loaded image, ensure it is in a likely product container
+            const productContainers = ['#imageBlock', '#altImages', '#main-image-container', '.regularAltImageViewLayout'];
+            if (!productContainers.some(selector => item.closest(selector))) {
+                // If not in a known product container, be safe and skip
+                return;
+            }
+        }
+
+        const src = item.getAttribute('data-a-image-source') ||
+            item.getAttribute('data-lazy-src') ||
+            item.getAttribute('data-src') ||
+            (item.tagName === 'IMG' ? (item as HTMLImageElement).src : '');
+
+        // Final URL validation
+        if (isValid(src) && !src.includes('review') && !src.includes('customer')) {
             const hiRes = toHighRes(src!);
             const base = getBase(hiRes);
             if (!seenBases.has(base)) {
@@ -232,7 +274,17 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
     let asinToImages: Record<string, string[]> = {};        // ASIN -> [URLs] (final mapping)
 
     // Current product ASIN
-    const currentAsin = (document.getElementById('ASIN') as HTMLInputElement)?.value || '';
+    // Current product ASIN
+    // Priority: 1. Visually selected swatch (most accurate for OOS/AJAX), 2. Hidden Input
+    let currentAsin = (document.getElementById('ASIN') as HTMLInputElement)?.value || '';
+
+    const selectedSwatch = document.querySelector('li.swatchSelect, li.selected, li[aria-selected="true"], .swatchAvailable.selected, .swatchUnavailable.selected');
+    if (selectedSwatch) {
+        const swatchAsin = selectedSwatch.getAttribute('data-asin') || selectedSwatch.getAttribute('data-defaultasin');
+        if (swatchAsin && swatchAsin !== currentAsin) {
+            currentAsin = swatchAsin;
+        }
+    }
 
     // =========================================================================
     // GLOBAL CACHE: Persist images across re-scrapes
@@ -587,6 +639,53 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
         }
     });
 
+    // --- Parse additional script patterns (e.g. jQuery.parseJSON) ---
+    scripts.forEach(script => {
+        const content = script.textContent || '';
+        if (content.length < 100) return;
+
+        // Pattern for scripts using jQuery.parseJSON for image data
+        if (content.includes('jQuery.parseJSON')) {
+            const jsonParams = content.match(/jQuery\.parseJSON\(['"](\{.*?\})['"]\)/g);
+            if (jsonParams) {
+                jsonParams.forEach(param => {
+                    const match = param.match(/\{.*\}/);
+                    if (match) {
+                        const parsed = safeParseJSON<any>(match[0]);
+                        if (parsed) {
+                            // Some blocks contain a single ASIN's data
+                            const asin = parsed.asin || (parsed.product && parsed.product.asin);
+                            const images: string[] = [];
+
+                            // Check common keys for image arrays
+                            const potentialImageArrays = [
+                                parsed.images, parsed.mainImages, parsed.altImages,
+                                parsed.colorImages, parsed.initial, parsed.imagesData
+                            ];
+
+                            potentialImageArrays.forEach(arr => {
+                                if (Array.isArray(arr)) {
+                                    arr.forEach(img => {
+                                        const url = typeof img === 'string' ? img : (img.hiRes || img.large || img.url || img.main);
+                                        if (url && typeof url === 'string' && !url.includes('transparent-pixel')) {
+                                            images.push(url);
+                                        }
+                                    });
+                                }
+                            });
+
+                            if (asin && asin.match(/^[A-Z0-9]{10}$/) && images.length > 0) {
+                                asinToImages[asin] = [...new Set([...(asinToImages[asin] || []), ...images])];
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    });
+
+    console.log('AMZImage DEBUG: Total images resolved (with extra scripts):', Object.keys(asinToImages).length);
+
     // =========================================================================
     // UPDATE CACHE & MERGE
     // =========================================================================
@@ -608,39 +707,49 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
     console.log('AMZImage DEBUG: Total images resolved (with cache):', Object.keys(asinToImages).length);
 
     // =========================================================================
-    // STEP 2.5: DOM GALLERY FALLBACK - Guarantee current product has images
+    // STEP 2.5: DOM GALLERY FALLBACK - Only when JSON extraction was insufficient
     // =========================================================================
-    // If JSON parsing failed or was incomplete for the current ASIN, use DOM scrape.
-    // CRITICAL: Skip if we are currently hovering a variant preview to avoid contamination.
-    const domGalleryImages = isHovering ? [] : scrapeCurrentDOMGallery();
+    // We ONLY use DOM scraping as a fallback when JSON parsing failed or was incomplete.
+    // This prevents duplicates: JSON sources like ImageBlockATF/colorImages already contain
+    // ALL images (visible + lazy-loaded). DOM scraping would just re-add the visible ones.
 
-    if (domGalleryImages.length > 0 && currentAsin) {
-        // ENRICH GALLERY:
-        // Amazon's JSON data (colorImages) sometimes only contains 2-3 preview images.
-        // We merge them with images found in the DOM (#altImages) to get the FULL gallery.
-        // CRITICAL: Since isHovering is false, we know these DOM images belong to the selected variant.
-        const existing = asinToImages[currentAsin] || [];
-        const existingBases = new Set(existing.map(url => getImageCoreId(url)));
+    const jsonGalleryForCurrentAsin = asinToImages[currentAsin] || [];
+    const jsonProvidedSufficientGallery = jsonGalleryForCurrentAsin.length >= 5;
 
-        const merged = [...existing];
-        let addedCount = 0;
+    if (!jsonProvidedSufficientGallery && currentAsin) {
+        // JSON extraction was insufficient - use DOM as fallback
+        const domGalleryImages = scrapeCurrentDOMGallery();
 
-        domGalleryImages.forEach(url => {
-            const base = getImageCoreId(url);
-            if (!existingBases.has(base)) {
-                merged.push(url);
-                existingBases.add(base);
-                addedCount++;
+        if (domGalleryImages.length > 0) {
+            const existing = asinToImages[currentAsin] || [];
+            const existingBases = new Set(existing.map(url => getImageCoreId(url)));
+
+            // Check if the DOM rail actually belongs to currentAsin
+            const firstDomBase = getImageCoreId(domGalleryImages[0]);
+            const isBelongingToCurrent = !isHovering || existingBases.size === 0 || existingBases.has(firstDomBase);
+
+            if (isBelongingToCurrent) {
+                const merged = [...existing];
+                let addedCount = 0;
+
+                domGalleryImages.forEach(url => {
+                    const base = getImageCoreId(url);
+                    if (!existingBases.has(base)) {
+                        merged.push(url);
+                        existingBases.add(base);
+                        addedCount++;
+                    }
+                });
+
+                if (addedCount > 0 || existing.length === 0) {
+                    asinToImages[currentAsin] = merged;
+                    globalCache[currentAsin] = merged;
+                    console.log(`AMZImage DEBUG: Current ASIN enriched via DOM fallback (+${addedCount}):`, currentAsin, 'total:', merged.length);
+                }
             }
-        });
-
-        if (addedCount > 0 || existing.length === 0) {
-            asinToImages[currentAsin] = merged;
-            globalCache[currentAsin] = merged;
-            console.log(`AMZImage DEBUG: Current ASIN enriched via DOM (+${addedCount}):`, currentAsin, 'total:', merged.length);
-        } else {
-            console.log('AMZImage DEBUG: DOM images were already in JSON source for', currentAsin);
         }
+    } else if (currentAsin) {
+        console.log(`AMZImage DEBUG: Skipping DOM scrape - JSON provided ${jsonGalleryForCurrentAsin.length} images for ${currentAsin}`);
     }
 
     // =========================================================================
@@ -713,13 +822,13 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
                 }
             }
 
-            // Merge images: prefer asinToImages, but supplement with domImages
+            // Merge images: prefer asinToImages
+            // CRITICAL FIX: Do NOT merge DOM swatch images if we already have a gallery.
+            // The swatch is often a duplicate or low-quality crop that adds an unwanted "extra" image.
+            // Only use domImages (swatches) if we found NOTHING else.
             let finalImages = [...images];
-            if (domImages.length > 0) {
-                const seenBases = new Set(finalImages.map(url => {
-                    const match = url.match(/images\/I\/([A-Za-z0-9]+)/);
-                    return match ? match[1] : url;
-                }));
+            if (finalImages.length === 0 && domImages.length > 0) {
+                const seenBases = new Set();
                 domImages.forEach(url => {
                     const base = url.match(/images\/I\/([A-Za-z0-9]+)/);
                     const baseKey = base ? base[1] : url;
