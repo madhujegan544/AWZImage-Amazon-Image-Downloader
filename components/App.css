@@ -323,3 +323,15 @@ video {
     user-select: none;
     display: block;
 }
+
+/* ============================================
+   Scrollbar Hiding Utility
+   ============================================ */
+.no-scrollbar::-webkit-scrollbar {
+    display: none;
+}
+
+.no-scrollbar {
+    -ms-overflow-style: none;  /* IE and Edge */
+    scrollbar-width: none;  /* Firefox */
+}

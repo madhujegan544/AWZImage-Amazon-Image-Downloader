@@ -201,7 +201,7 @@ const enrichProductData = (data: ProductData | null): ProductData | null => {
     };
 };
 
-const getMediaItems = (data: ProductData | null): MediaItem[] => {
+const getMediaItems = (data: ProductData | null, overrideAsin?: string | null): MediaItem[] => {
     if (!data) return [];
 
     const items: MediaItem[] = [];
@@ -218,7 +218,17 @@ const getMediaItems = (data: ProductData | null): MediaItem[] => {
 
     // Determine which product images to show
     let displayImages: string[] = [];
-    const selectedVariant = data.variants?.find(v => v.selected);
+
+    // PRIORITY 0: Check override ASIN first (user clicked in panel)
+    let selectedVariant = overrideAsin
+        ? data.variants?.find(v => v.asin === overrideAsin)
+        : data.variants?.find(v => v.selected);
+
+    // Fallback if override variant not found (shouldn't happen if valid ASIN)
+    if (!selectedVariant) {
+        selectedVariant = data.variants?.find(v => v.selected);
+    }
+
     const hasVariants = data.variants && data.variants.length > 0;
 
     if (selectedVariant) {
@@ -318,7 +328,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     const [selectedVariantAsin, setSelectedVariantAsin] = useState<string | null>(null);
 
     // Derived state
-    const allMediaItems = useMemo(() => getMediaItems(productData), [productData]);
+    // Use selectedVariantAsin to override default selection logic
+    const allMediaItems = useMemo(() => getMediaItems(productData, selectedVariantAsin), [productData, selectedVariantAsin]);
     const isProductPage = productData?.pageType === 'product';
     const isListingPage = productData?.pageType === 'listing';
 
@@ -578,9 +589,12 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
         // If downloading product images (page-specific), structure it by variants
         if (hasVariantsWithImages) {
-            Object.entries(productData.variantImages!).forEach(([vName, vUrls]) => {
-                if (!vUrls || vUrls.length === 0) return;
-                const safeName = vName.replace(/[^a-zA-Z0-9_-]/g, '_');
+            // Iterate through ALL enriched variants to get their full image sets
+            productData.variants.forEach(variant => {
+                const vUrls = variant.images || [];
+                if (vUrls.length === 0) return;
+
+                const safeName = variant.name.replace(/[^a-zA-Z0-9_-]/g, '_');
                 vUrls.forEach((url, i) => {
                     let ext = 'jpg';
                     if (url.includes('.png')) ext = 'png';
@@ -1022,16 +1036,29 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                         const isCurrent = selectedVariantAsin ? variant.asin === selectedVariantAsin : variant.selected;
                         const isUnavailable = !variant.available;
 
-                        // DEBUG: Check images count
-                        if (index === 0) {
-                            console.log('PanelApp DEBUG: Variant[0] images:', variant.images?.length, variant.images);
-                        }
-
                         // Get thumbnail - try variant image, then variantImagesByAsin, then default
                         let thumbnail = variant.image || '';
                         if (!thumbnail && productData?.variantImagesByAsin?.[variant.asin]?.[0]) {
                             thumbnail = productData.variantImagesByAsin[variant.asin][0];
                         }
+
+                        // Use pre-enriched images from the variant data
+                        const displayImages = variant.images || [];
+                        const imageCount = displayImages.length;
+
+                        // GUARANTEE 2 preview images: duplicate if only 1 exists
+                        let previewImages: string[] = [];
+                        if (imageCount >= 2) {
+                            previewImages = displayImages.slice(0, 2);
+                        } else if (imageCount === 1) {
+                            // Duplicate single image to fill both slots
+                            previewImages = [displayImages[0], displayImages[0]];
+                        } else if (imageCount === 0 && thumbnail) {
+                            // Absolute fallback to card thumbnail
+                            previewImages = [thumbnail, thumbnail];
+                        }
+
+                        const remainingCount = imageCount > 2 ? imageCount - 2 : 0;
 
                         return (
                             <div
@@ -1094,151 +1121,131 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 </div>
 
                                 {/* Gallery Preview (up to 2 images + counter) - ALWAYS SHOW */}
-                                {(() => {
-                                    // Use pre-enriched images from the variant data
-                                    // Each variant already has its full gallery fetched in background
-                                    const displayImages = variant.images || [];
-                                    const imageCount = displayImages.length;
-
-                                    // GUARANTEE 2 preview images: duplicate if only 1 exists
-                                    let previewImages: string[] = [];
-                                    if (imageCount >= 2) {
-                                        previewImages = displayImages.slice(0, 2);
-                                    } else if (imageCount === 1) {
-                                        // Duplicate single image to fill both slots
-                                        previewImages = [displayImages[0], displayImages[0]];
-                                    } else if (imageCount === 0 && thumbnail) {
-                                        // Absolute fallback to card thumbnail
-                                        previewImages = [thumbnail, thumbnail];
-                                    }
-
-                                    const remainingCount = imageCount > 2 ? imageCount - 2 : 0;
-
-
-
-                                    return (
-                                        <div style={{ position: 'relative', marginTop: 'auto', width: '100%' }}>
-                                            {previewImages.length >= 2 ? (
-                                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '5px' }}>
-                                                    {/* Always show 2 preview images */}
-                                                    {previewImages.map((img, idx) => (
-                                                        <div key={idx} style={{
-                                                            aspectRatio: '1',
-                                                            borderRadius: '8px',
-                                                            background: `url(${img}) center/contain no-repeat`,
-                                                            backgroundColor: '#fafafa',
-                                                            border: `1px solid rgba(0,0,0,0.06)`,
-                                                            boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.04)',
-                                                            transition: 'transform 0.2s ease, box-shadow 0.2s ease'
-                                                        }}
-                                                            className="variant-thumb"
-                                                        />
-                                                    ))}
-                                                    {/* +N counter or empty third slot */}
-                                                    {remainingCount > 0 ? (
-                                                        <div style={{
-                                                            aspectRatio: '1',
-                                                            borderRadius: '8px',
-                                                            background: 'rgba(241, 245, 249, 0.8)',
-                                                            border: `1px solid ${COLORS.border}`,
-                                                            display: 'flex',
-                                                            alignItems: 'center',
-                                                            justifyContent: 'center',
-                                                            fontSize: '12px',
-                                                            fontWeight: 700,
-                                                            color: COLORS.textSecondary,
-                                                            boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.04)'
-                                                        }}>
-                                                            +{remainingCount}
-                                                        </div>
-                                                    ) : (
-                                                        <div style={{
-                                                            aspectRatio: '1',
-                                                            borderRadius: '8px',
-                                                            background: 'rgba(241, 245, 249, 0.5)',
-                                                            border: `1px dashed rgba(0,0,0,0.1)`,
-                                                        }} />
-                                                    )}
-                                                </div>
-                                            ) : (
-                                                /* No images at all - show placeholder */
-                                                <div style={{
-                                                    width: '100%',
-                                                    height: '60px',
+                                <div style={{ position: 'relative', marginTop: 'auto', width: '100%' }}>
+                                    <div
+                                        style={{
+                                            display: 'flex',
+                                            overflowX: 'auto',
+                                            gap: '6px',
+                                            paddingBottom: '4px',
+                                            scrollBehavior: 'smooth',
+                                            scrollbarWidth: 'none', // Firefox
+                                            msOverflowStyle: 'none' // IE/Edge
+                                        }}
+                                        className="no-scrollbar"
+                                    >
+                                        {/* Render ALL images in scrollable list */}
+                                        {displayImages.length > 0 ? (
+                                            displayImages.map((img, idx) => (
+                                                <div key={idx} style={{
+                                                    flex: '0 0 33%', // Shows ~3 items (approx)
+                                                    aspectRatio: '1',
                                                     borderRadius: '8px',
-                                                    background: COLORS.backgroundSecondary,
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    justifyContent: 'center',
-                                                }}>
-                                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={COLORS.textMuted} strokeWidth="1.5">
-                                                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                                                        <circle cx="8.5" cy="8.5" r="1.5" />
-                                                        <polyline points="21 15 16 10 5 21" />
-                                                    </svg>
-                                                </div>
-                                            )}
-
-                                            {/* Download Button Overlay */}
-                                            {imageCount > 0 && (
-                                                <button
+                                                    background: `url(${img}) center/contain no-repeat`,
+                                                    backgroundColor: '#fafafa',
+                                                    border: `1px solid rgba(0,0,0,0.06)`,
+                                                    boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.04)',
+                                                    transition: 'transform 0.2s ease, box-shadow 0.2s ease',
+                                                    cursor: 'zoom-in'
+                                                }}
                                                     onClick={(e) => {
                                                         e.stopPropagation();
-                                                        // Prevent download if still loading variant data
-                                                        if (selectingVariant) return;
+                                                        if (showPreview) showPreview(img, 'image', displayImages);
+                                                    }}
+                                                    className="variant-thumb"
+                                                />
+                                            ))
+                                        ) : (
+                                            /* No images - show placeholder */
+                                            <div style={{
+                                                width: '100%',
+                                                height: '60px', // Approx height of thumbs
+                                                borderRadius: '8px',
+                                                background: COLORS.backgroundSecondary,
+                                                border: `1px dashed rgba(0,0,0,0.1)`,
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'center'
+                                            }}>
+                                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={COLORS.textMuted} strokeWidth="1.5">
+                                                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                                                    <circle cx="8.5" cy="8.5" r="1.5" />
+                                                    <polyline points="21 15 16 10 5 21" />
+                                                </svg>
+                                            </div>
+                                        )}
+                                    </div>
 
-                                                        // Use the variant's own enriched images (background fetched)
-                                                        const imagesToDownload = variant.images || [];
+                                    {/* Image Count Label - NEW */}
+                                    <div style={{
+                                        marginTop: '8px',
+                                        fontSize: '10px',
+                                        fontWeight: 600,
+                                        color: COLORS.textMuted,
+                                        textAlign: 'right'
+                                    }}>
+                                        {imageCount} Image{imageCount !== 1 ? 's' : ''} Available
+                                    </div>
 
-                                                        if (imagesToDownload.length > 0) {
-                                                            const filename = `pixora-${productData?.asin || 'product'}-${variant.name.replace(/[^a-zA-Z0-9]/g, '_')}-${Date.now()}`;
-                                                            downloadZip(imagesToDownload, filename);
-                                                        }
-                                                    }}
-                                                    onMouseEnter={() => {
-                                                        if (!isCurrent && !selectingVariant && !isUnavailable) {
-                                                            handleVariantSelect(variant.asin, variant.name);
-                                                        }
-                                                    }}
-                                                    disabled={selectingVariant}
-                                                    className="variant-download-btn"
-                                                    style={{
-                                                        position: 'absolute',
-                                                        bottom: '6px',
-                                                        right: '6px',
-                                                        width: '24px',
-                                                        height: '24px',
-                                                        borderRadius: '6px',
-                                                        background: selectingVariant ? COLORS.backgroundSecondary : '#fff',
-                                                        border: `1px solid ${COLORS.border}`,
-                                                        display: 'flex',
-                                                        alignItems: 'center',
-                                                        justifyContent: 'center',
-                                                        cursor: selectingVariant ? 'wait' : 'pointer',
-                                                        boxShadow: COLORS.shadowSm,
-                                                        color: selectingVariant ? COLORS.textMuted : COLORS.text,
-                                                        transition: 'all 0.2s ease',
-                                                        opacity: selectingVariant ? 0.7 : 1
-                                                    }}
-                                                    title={selectingVariant ? 'Loading variant...' : `Download ${imageCount} image${imageCount > 1 ? 's' : ''}`}
-                                                >
-                                                    {selectingVariant ? (
-                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: 'spin 1s linear infinite' }}>
-                                                            <path d="M21 12a9 9 0 11-6.219-8.56" />
-                                                        </svg>
-                                                    ) : (
-                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                                                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                                                            <polyline points="7 10 12 15 17 10" />
-                                                            <line x1="12" y1="15" x2="12" y2="3" />
-                                                        </svg>
-                                                    )}
-                                                </button>
+                                    {/* Download Button Overlay */}
+                                    {imageCount > 0 && (
+                                        <button
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                // Prevent download if still loading variant data
+                                                if (selectingVariant) return;
+
+                                                // Use the variant's own enriched images (background fetched)
+                                                const imagesToDownload = variant.images || [];
+
+                                                if (imagesToDownload.length > 0) {
+                                                    const filename = `pixora-${productData?.asin || 'product'}-${variant.name.replace(/[^a-zA-Z0-9]/g, '_')}-${Date.now()}`;
+                                                    downloadZip(imagesToDownload, filename);
+                                                }
+                                            }}
+                                            onMouseEnter={async () => {
+                                                // On hover, select this variant to load all its images
+                                                if (!isCurrent && !selectingVariant && !isUnavailable) {
+                                                    handleVariantSelect(variant.asin, variant.name);
+                                                }
+                                            }}
+                                            disabled={selectingVariant}
+                                            className="variant-download-btn"
+                                            style={{
+                                                position: 'absolute',
+                                                bottom: '22px', // Moved up slightly to accommodate label
+                                                right: '6px',
+                                                width: '24px',
+                                                height: '24px',
+                                                borderRadius: '6px',
+                                                background: selectingVariant ? COLORS.backgroundSecondary : '#fff',
+                                                border: `1px solid ${COLORS.border}`,
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'center',
+                                                cursor: selectingVariant ? 'wait' : 'pointer',
+                                                boxShadow: COLORS.shadowSm,
+                                                color: selectingVariant ? COLORS.textMuted : COLORS.text,
+                                                transition: 'all 0.2s ease',
+                                                opacity: selectingVariant ? 0.7 : 1
+                                            }}
+                                            title={selectingVariant ? 'Loading variant...' : `Download ${imageCount} image${imageCount > 1 ? 's' : ''}`}
+                                        >
+                                            {selectingVariant ? (
+                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: 'spin 1s linear infinite' }}>
+                                                    <path d="M21 12a9 9 0 11-6.219-8.56" />
+                                                </svg>
+                                            ) : (
+                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                                    <polyline points="7 10 12 15 17 10" />
+                                                    <line x1="12" y1="15" x2="12" y2="3" />
+                                                </svg>
                                             )}
+                                        </button>
+                                    )}
 
-                                        </div>
-                                    );
-                                })()}
+                                </div>
                             </div>
                         );
                     })}
