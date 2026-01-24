@@ -20,6 +20,7 @@ interface ProductVariant {
     images?: string[]; // Added: full gallery
     available: boolean;
     selected: boolean;
+    isLoading?: boolean;
 }
 
 interface ListingProduct {
@@ -70,32 +71,38 @@ type SubTab = 'images' | 'videos';
 // Design Tokens
 // ============================================
 const COLORS = {
-    primary: '#4F46E5', // Indigo 600 - Softer than pure blue
-    primaryHover: '#4338CA', // Indigo 700
-    primarySoft: '#EEF2FF', // Indigo 50
-    primaryGlow: 'rgba(79, 70, 229, 0.12)',
+    // Primary: Professional Blue (Inter/System Blue) - Trustworthy & Clear
+    primary: '#2563EB', // Blue 600
+    primaryHover: '#1D4ED8', // Blue 700
+    primarySoft: '#EFF6FF', // Blue 50
+    primaryGlow: 'rgba(37, 99, 235, 0.15)',
 
+    // Surface & Backgrounds - Clean & Technical
     surface: '#FFFFFF',
-    background: '#FAFAFA', // Gray 50
-    backgroundSecondary: '#F3F4F6', // Gray 100
+    background: '#F1F5F9', // Slate 100 - Slightly darker than before for contrast
+    backgroundSecondary: '#E2E8F0', // Slate 200
 
-    text: '#1F2937', // Gray 800 - Softer than black
-    textSecondary: '#6B7280', // Gray 500
-    textMuted: '#9CA3AF', // Gray 400
+    // Typography - High Legibility
+    text: '#0F172A', // Slate 900
+    textSecondary: '#475569', // Slate 600
+    textMuted: '#94A3B8', // Slate 400
     textInverse: '#FFFFFF',
 
-    border: '#F3F4F6', // Very subtle border
-    borderLight: '#F9FAFB',
+    // Borders
+    border: '#CBD5E1', // Slate 300
+    borderLight: '#E2E8F0', // Slate 200
 
+    // Status
     success: '#10B981',
     successSoft: '#ECFDF5',
     warning: '#F59E0B',
     warningSoft: '#FFFBEB',
 
+    // Shadows
     shadowSm: '0 1px 2px 0 rgba(0, 0, 0, 0.05)',
     shadowMd: '0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03)',
     shadowLg: '0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.02)',
-    shadowPrimary: '0 4px 14px 0 rgba(79, 70, 229, 0.15)',
+    shadowPrimary: '0 4px 14px 0 rgba(37, 99, 235, 0.2)',
 };
 
 const INITIAL_ITEMS_COUNT = 6;
@@ -608,18 +615,38 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
         let finalData: ProductData | null = productData;
 
-        try {
-            // Ensure background deep fetch matches are finished
-            await browser.runtime.sendMessage({ type: 'AWAIT_DEEP_FETCH' });
-            // Refresh local state one last time to get the full gallery
-            const rawData = await scrapeProductData(false);
-            if (rawData) {
-                const enriched = enrichProductData(rawData);
-                setProductData(enriched);
-                finalData = enriched;
+        // If downloading product images (page-specific), FORCE DEEP FETCH first
+        if (isProductPage && mainTab === 'product' && subTab === 'images') {
+            console.log("PanelApp: Triggering forced deep fetch before download...");
+            // Show global loader to indicate "Scanning..."
+
+            try {
+                // Wait for background to confirm it has attempted to fetch all missing data
+                await new Promise<void>((resolve) => {
+                    browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
+                        const tabId = tabs[0]?.id;
+                        if (tabId) {
+                            browser.tabs.sendMessage(tabId, { type: 'FORCE_ENRICH_ALL' }).then(() => {
+                                resolve();
+                            });
+                        } else {
+                            resolve();
+                        }
+                    });
+                });
+            } catch (e) {
+                console.warn("Forced enrichment warning:", e);
             }
-        } catch (e) {
-            console.warn("Deep fetch wait failed", e);
+
+            // Refresh local state one last time to get the full completed gallery
+            try {
+                const refreshed = await scrapeProductData(false);
+                if (refreshed) {
+                    const enriched = enrichProductData(refreshed);
+                    setProductData(enriched);
+                    finalData = enriched;
+                }
+            } catch (e) { }
         }
 
         let items: (string | { url: string; filename: string })[] = [];
@@ -1042,14 +1069,17 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     justifyContent: 'space-between',
                     marginBottom: '10px',
                     position: 'sticky',
-                    top: '-14px', // Offset for container padding
+                    top: '-14px',
                     zIndex: 20,
-                    background: COLORS.background,
+                    // Glassmorphism Header
+                    background: 'rgba(248, 250, 252, 0.85)',
+                    backdropFilter: 'blur(12px)',
+                    WebkitBackdropFilter: 'blur(12px)', // Safari support
                     padding: '8px 0',
                     margin: '0 -14px 10px -14px',
                     paddingLeft: '14px',
                     paddingRight: '14px',
-                    borderBottom: `1px solid ${COLORS.borderLight}`
+                    borderBottom: `1px solid ${COLORS.border}`
                 }}>
                     <span style={{
                         fontSize: '11px',
@@ -1106,17 +1136,17 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 style={{
                                     display: 'flex',
                                     flexDirection: 'column',
-                                    gap: '10px',
                                     padding: '12px',
                                     borderRadius: '12px',
-                                    background: isCurrent ? COLORS.surface : COLORS.surface,
-                                    border: isCurrent ? `1.5px solid ${COLORS.primary}` : `1px solid ${COLORS.border}`,
+                                    background: COLORS.surface,
+                                    // Remove border for non-selected items to reduce visual noise
+                                    border: isCurrent ? `1.5px solid ${COLORS.primary}` : '1px solid transparent',
+                                    // Soft shadow for depth
                                     boxShadow: isCurrent ? COLORS.shadowPrimary : COLORS.shadowSm,
                                     cursor: selectingVariant ? 'wait' : isCurrent ? 'default' : 'pointer',
-                                    transition: 'all 0.2s ease',
                                     opacity: isUnavailable ? 0.7 : 1
                                 }}
-                                className={!isCurrent ? 'variant-option-hover' : ''}
+                                className={`variant-card ${!isCurrent ? 'variant-option-hover' : ''}`}
                             >
                                 {/* Info */}
                                 <div style={{ width: '100%' }}>
@@ -1198,7 +1228,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                                     className="variant-thumb"
                                                 >
                                                     {/* Show loader ONLY on the second slot if data is incomplete (waiting for deep fetch) */}
-                                                    {displayImages.length < 2 && idx === 1 && (
+                                                    {/* Show loader if backend explicitly says it's fetching */}
+                                                    {variant.isLoading && idx === 1 && (
                                                         <div style={{
                                                             position: 'absolute',
                                                             top: 0, left: 0, right: 0, bottom: 0,
@@ -1273,8 +1304,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                             className="variant-download-btn"
                                             style={{
                                                 position: 'absolute',
-                                                bottom: '8px',
-                                                right: '0px',
+                                                bottom: '5px',
+                                                right: '5px',
                                                 width: '26px',
                                                 height: '26px',
                                                 borderRadius: '50%',
@@ -1496,7 +1527,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             showPreview(product.image, 'image', [product.image]);
                         }
                     }}
-                    style={{ aspectRatio: '1', background: COLORS.backgroundSecondary, position: 'relative' }}
+                    style={{ aspectRatio: '1', position: 'relative' }}
                     className="listing-image"
                 >
                     <img
@@ -1759,117 +1790,178 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 </div>
             )}
 
-            {/* CATEGORY TABS (Product Pages) */}
-            {!loading && isProductPage && hasContent && renderCategoryTabs()}
-
-            {/* TOP DOWNLOAD BAR - Prominent position */}
-            {!loading && hasContent && (
+            {/* HEADER ACTION BAR - Product Page (Compact & Powerful) */}
+            {!loading && hasContent && isProductPage && (
                 <div style={{
-                    padding: '10px 14px',
+                    padding: '12px 14px',
                     background: COLORS.surface,
                     borderBottom: `1px solid ${COLORS.borderLight}`,
-                    flexShrink: 0
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '12px',
+                    flexShrink: 0,
+                    zIndex: 30
                 }}>
-                    {isSelectionMode ? (
-                        <div style={{ display: 'flex', gap: '8px' }}>
+                    {/* Top Row: Navigation + Download */}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                        {/* Compact Tabs (Segmented Control) */}
+                        <div style={{
+                            display: 'flex',
+                            background: COLORS.background,
+                            padding: '4px',
+                            borderRadius: '8px',
+                            flex: 1
+                        }}>
                             <button
-                                onClick={clearSelection}
+                                onClick={() => setMainTab('product')}
                                 style={{
-                                    flex: 1, padding: '10px', background: COLORS.background,
-                                    border: `1px solid ${COLORS.border}`, borderRadius: '8px',
-                                    fontSize: '13px', fontWeight: 600, color: COLORS.text, cursor: 'pointer'
+                                    flex: 1, padding: '6px 12px',
+                                    borderRadius: '6px',
+                                    fontSize: '13px', fontWeight: 600,
+                                    background: mainTab === 'product' ? COLORS.surface : 'transparent',
+                                    color: mainTab === 'product' ? COLORS.text : COLORS.textSecondary,
+                                    boxShadow: mainTab === 'product' ? COLORS.shadowSm : 'none',
+                                    transition: 'all 0.2s ease'
                                 }}
                             >
-                                Cancel
+                                Product
                             </button>
                             <button
-                                onClick={downloadSelected}
-                                disabled={selectedCount === 0 || downloading}
+                                onClick={() => setMainTab('review')}
                                 style={{
-                                    flex: 2, padding: '10px',
-                                    background: downloadSuccess ? COLORS.success : COLORS.primary,
-                                    border: 'none', borderRadius: '8px',
-                                    fontSize: '13px', fontWeight: 600, color: '#fff',
-                                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
-                                    boxShadow: COLORS.shadowPrimary,
-                                    cursor: selectedCount === 0 || downloading ? 'not-allowed' : 'pointer',
-                                    opacity: selectedCount === 0 ? 0.6 : 1
+                                    flex: 1, padding: '6px 12px',
+                                    borderRadius: '6px',
+                                    fontSize: '13px', fontWeight: 600,
+                                    background: mainTab === 'review' ? COLORS.surface : 'transparent',
+                                    color: mainTab === 'review' ? COLORS.text : COLORS.textSecondary,
+                                    boxShadow: mainTab === 'review' ? COLORS.shadowSm : 'none',
+                                    transition: 'all 0.2s ease'
                                 }}
                             >
-                                {downloading ? (
-                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: 'spin 1s linear infinite' }}>
-                                        <path d="M23 4v6h-6M1 20v-6h6" />
-                                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-                                    </svg>
-                                ) : downloadSuccess ? '✓ Done' : (
-                                    <>
-                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                                            <polyline points="7 10 12 15 17 10" />
-                                            <line x1="12" y1="15" x2="12" y2="3" />
-                                        </svg>
-                                        {selectedCount === displayCount ? 'Download All' : `Download ${selectedCount} images`}
-                                    </>
-                                )}
+                                Reviews
                             </button>
                         </div>
-                    ) : (
-                        <div style={{ display: 'flex', gap: '8px' }}>
-                            {/* Select All Button Removed */}
 
-                            <button
-                                onClick={downloadAll}
-                                disabled={downloading}
-                                className="download-main-btn"
-                                style={{
-                                    flex: 1,
-                                    padding: '12px 24px',
-                                    background: downloadSuccess
-                                        ? 'linear-gradient(135deg, #34D399 0%, #10B981 100%)'
-                                        : 'linear-gradient(135deg, #818CF8 0%, #6366F1 100%)',
-                                    border: 'none',
-                                    borderRadius: '12px',
-                                    fontSize: '15px',
-                                    fontWeight: 600,
-                                    color: '#fff',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                    gap: '12px',
-                                    boxShadow: downloadSuccess
-                                        ? '0 4px 12px rgba(16, 185, 129, 0.2)'
-                                        : '0 4px 12px rgba(99, 102, 241, 0.25)',
-                                    cursor: downloading ? 'not-allowed' : 'pointer',
-                                    transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
-                                    transform: downloading ? 'scale(0.98)' : 'scale(1)',
-                                }}
-                            >
-                                {downloading ? (
-                                    <>
-                                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: 'spin 1s linear infinite' }}>
-                                            <path d="M23 4v6h-6M1 20v-6h6" />
-                                            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-                                        </svg>
-                                        <span style={{ opacity: 0.9 }}>Downloading...</span>
-                                    </>
-                                ) : downloadSuccess ? (
-                                    <>
-                                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                                            <polyline points="20 6 9 17 4 12" />
-                                        </svg>
-                                        Downloaded!
-                                    </>
-                                ) : (
-                                    <>
-                                        Download All
-                                    </>
-                                )}
-                            </button>
-                        </div>
-                    )}
+                        {/* ACTION: Download All (Top Right) */}
+                        <button
+                            onClick={downloadAll}
+                            disabled={downloading}
+                            className="download-compact-btn"
+                            style={{
+                                padding: '8px 16px',
+                                background: COLORS.primary,
+                                border: 'none',
+                                borderRadius: '8px',
+                                fontSize: '13px',
+                                fontWeight: 700,
+                                color: '#fff',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                boxShadow: COLORS.shadowPrimary,
+                                cursor: downloading ? 'not-allowed' : 'pointer',
+                                height: '36px', // Match header height
+                                whiteSpace: 'nowrap'
+                            }}
+                        >
+                            {downloading ? (
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: 'spin 1s linear infinite' }}>
+                                    <path d="M23 4v6h-6M1 20v-6h6" />
+                                </svg>
+                            ) : (
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                    <polyline points="7 10 12 15 17 10" />
+                                    <line x1="12" y1="15" x2="12" y2="3" />
+                                </svg>
+                            )}
+                            {downloading ? 'WAIT...' : 'DOWNLOAD'}
+                        </button>
+                    </div>
+
+                    {/* Second Row: Sub-Filters (Images/Videos) - Only visual toggles now */}
+                    <div style={{ display: 'flex', gap: '10px' }}>
+                        <button
+                            onClick={() => setSubTab('images')}
+                            style={{
+                                display: 'flex', alignItems: 'center', gap: '6px',
+                                padding: '4px 8px', borderRadius: '100px',
+                                border: `1px solid ${subTab === 'images' ? COLORS.primary : COLORS.border}`,
+                                background: subTab === 'images' ? COLORS.primarySoft : 'transparent',
+                                color: subTab === 'images' ? COLORS.primary : COLORS.textSecondary,
+                                fontSize: '11px', fontWeight: 600
+                            }}
+                        >
+                            <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: subTab === 'images' ? COLORS.primary : COLORS.border }} />
+                            Images ({categoryCounts[mainTab === 'product' ? 'productImages' : 'reviewImages']})
+                        </button>
+                        <button
+                            onClick={() => setSubTab('videos')}
+                            style={{
+                                display: 'flex', alignItems: 'center', gap: '6px',
+                                padding: '4px 8px', borderRadius: '100px',
+                                border: `1px solid ${subTab === 'videos' ? COLORS.primary : COLORS.border}`,
+                                background: subTab === 'videos' ? COLORS.primarySoft : 'transparent',
+                                color: subTab === 'videos' ? COLORS.primary : COLORS.textSecondary,
+                                fontSize: '11px', fontWeight: 600
+                            }}
+                        >
+                            <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: subTab === 'videos' ? COLORS.primary : COLORS.border }} />
+                            Videos ({categoryCounts[mainTab === 'product' ? 'productVideos' : 'reviewVideos']})
+                        </button>
+                    </div>
                 </div>
-            )
-            }
+            )}
+
+            {/* HEADER ACTION BAR - Listing Page (Simple Download) */}
+            {!loading && hasContent && isListingPage && (
+                <div style={{
+                    padding: '12px 14px',
+                    background: COLORS.surface,
+                    borderBottom: `1px solid ${COLORS.borderLight}`,
+                    flexShrink: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between'
+                }}>
+                    <div style={{ fontSize: '13px', fontWeight: 600, color: COLORS.textSecondary }}>
+                        {/* Simple count for listing */}
+                        {filteredListingProducts.length} Products Found
+                    </div>
+
+                    <button
+                        onClick={downloadAll}
+                        disabled={downloading}
+                        style={{
+                            padding: '8px 16px',
+                            background: COLORS.primary,
+                            border: 'none',
+                            borderRadius: '8px',
+                            fontSize: '13px',
+                            fontWeight: 700,
+                            color: '#fff',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            boxShadow: COLORS.shadowPrimary,
+                            cursor: downloading ? 'not-allowed' : 'pointer',
+                        }}
+                    >
+                        {downloading ? (
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: 'spin 1s linear infinite' }}>
+                                <path d="M23 4v6h-6M1 20v-6h6" />
+                            </svg>
+                        ) : (
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                <polyline points="7 10 12 15 17 10" />
+                                <line x1="12" y1="15" x2="12" y2="3" />
+                            </svg>
+                        )}
+                        DOWNLOAD ALL
+                    </button>
+                </div>
+            )}
 
             {/* CONTENT - Reorganized based on two-level navigation */}
             <main style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -2051,8 +2143,10 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 
                 /* Variant cards */
                 .variant-option-hover:hover { 
-                    background: ${COLORS.backgroundSecondary} !important; 
-                    transform: translateY(-1px); 
+                    transform: translateY(-2px) !important;
+                    box-shadow: ${COLORS.shadowMd} !important;
+                    background: ${COLORS.surface} !important;
+                    z-index: 5;
                 }
                 .variant-download-btn:hover { background: ${COLORS.primary} !important; color: #fff !important; transform: scale(1.05); }
                 .variant-thumb:hover { transform: scale(1.02); box-shadow: 0 4px 6px rgba(0,0,0,0.05) !important; }

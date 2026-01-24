@@ -5,6 +5,7 @@ export interface VariantItem {
     images?: string[];
     selected: boolean;
     available: boolean;
+    isLoading?: boolean;
 }
 
 interface ColorImageEntry {

@@ -465,6 +465,32 @@ export default defineContentScript({
                 return true;
             }
 
+            if (message.type === 'FORCE_ENRICH_ALL') {
+                console.log('AMZImage: Force enriching ALL variants...');
+                // Get fresh list of all variants
+                // Note: scrapeProductData calls scrapeVariants internally
+                scrapeProductData().then(data => {
+                    const variants = data.variants;
+                    const targets = variants.filter(v => {
+                        // @ts-ignore
+                        const cache = window._amzImageCache || {};
+                        const hasCache = cache[v.asin] && cache[v.asin].length >= 3;
+                        return !hasCache; // Fetch everything that isn't fully cached
+                    });
+
+                    if (targets.length > 0) {
+                        // Bypass visited check for forced enrichment, but respect queue
+                        deepFetchVariantImages(targets, true).then(() => {
+                            sendResponse({ status: 'complete' });
+                            notifyContentChange('deep_fetch_complete'); // Notify UI explicitly
+                        });
+                    } else {
+                        sendResponse({ status: 'complete' }); // Nothing to do
+                    }
+                });
+                return true; // Keep channel open
+            }
+
             if (message.type === 'GET_IMAGES') {
                 scrapeProductData().then(data => {
                     const allImages = [...data.productImages, ...data.reviewImages];
@@ -995,7 +1021,7 @@ export default defineContentScript({
         // @ts-ignore
         const visitedAsins = window._amzVisitedAsins as Set<string>;
 
-        async function deepFetchVariantImages(variants: VariantItem[]) {
+        async function deepFetchVariantImages(variants: VariantItem[], fastMode: boolean = false) {
             // @ts-ignore
             if (!window._amzImageCache) window._amzImageCache = {};
             // @ts-ignore
@@ -1003,7 +1029,7 @@ export default defineContentScript({
 
             // Filter variants that need fetching:
             // 1. Not currently being fetched (Queue)
-            // 2. Not already attempted/visited (Visited Set) - CRITICAL FIX FOR LOOP
+            // 2. Not already attempted/visited (Visited Set) - UNLESS fastMode (force retry)
             // 3. Not currently cached with sufficient data
             // 4. Not the current ASIN
             const currentAsin = getCurrentAsin();
@@ -1012,25 +1038,27 @@ export default defineContentScript({
                 const isQueued = deepFetchQueue.has(v.asin);
                 const hasCache = cache[v.asin] && cache[v.asin].length >= 3;
 
-                // If we already visited it, don't try again even if cache is empty
-                if (isVisited) return false;
+                // If fastMode, retry even if visited, provided we don't have good cache
+                // But still respect the queue to avoid double-fetching
+                if (isVisited && !fastMode) return false;
 
                 return !hasCache && !isQueued && v.asin !== currentAsin;
             });
 
             if (targets.length === 0) return;
 
-            console.log(`AMZImage: Starting deep fetch for ${targets.length} variants...`);
+            console.log(`AMZImage: Starting ${fastMode ? 'FAST' : 'deep'} fetch for ${targets.length} variants...`);
 
             // Process in chunks
-            // Process in chunks - Increased for speed (6 parallel requests is standard browser limit)
-            const CHUNK_SIZE = 6;
+            // Fast Mode: 20 parallel requests (Aggressive)
+            // Normal Mode: 6 parallel requests (Polite)
+            const CHUNK_SIZE = fastMode ? 20 : 6;
             for (let i = 0; i < targets.length; i += CHUNK_SIZE) {
                 const chunk = targets.slice(i, i + CHUNK_SIZE);
 
                 await Promise.all(chunk.map(async (variant) => {
                     deepFetchQueue.add(variant.asin);
-                    visitedAsins.add(variant.asin); // Mark as attempted immediately
+                    visitedAsins.add(variant.asin);
                     try {
                         const url = `/dp/${variant.asin}?psc=1`;
                         const response = await fetch(url);
@@ -1038,31 +1066,51 @@ export default defineContentScript({
                         const html = await response.text();
                         let extractedImages: string[] = [];
 
-                        // Strategy: Parse ONLY the script tags to find ImageBlockATF
-                        // This prevents capturing "hiRes" urls from sponsored products, carousels, or other widgets
+                        // STRATEGY A: Specific Script Parsing (ImageBlockATF)
                         const scriptRegex = /<script[^>]*>([\s\S]*?)<\/script>/gi;
                         let match;
                         while ((match = scriptRegex.exec(html)) !== null) {
                             const scriptContent = match[1];
-
-                            // Target the specific data block for the main gallery
-                            if (scriptContent.includes('ImageBlockATF') || scriptContent.includes("'colorImages'")) {
+                            if (scriptContent.includes('ImageBlockATF')) {
                                 const hiResMatches = scriptContent.match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/g);
                                 if (hiResMatches) {
                                     const found = hiResMatches
                                         .map(m => m.match(/"(https:\/\/[^"]+)"/)?.[1])
                                         .filter((url): url is string => !!url);
-
-                                    // If we found a good chunk of images, this is likely the main gallery
                                     if (found.length > 0) {
                                         extractedImages = found;
-                                        break; // Stop immediately to avoid polluting with other scripts
+                                        break;
                                     }
                                 }
                             }
                         }
 
-                        // Fallback Strategy: Look for imageGalleryData (Newer layouts) if strict script parsing failed
+                        // STRATEGY B: 'colorImages' Data Block (Newer Layouts)
+                        if (extractedImages.length === 0) {
+                            const colorImagesMatch = html.match(/'colorImages':\s*({[\s\S]*?})\s*,/);
+                            if (colorImagesMatch) {
+                                const hiResMatches = colorImagesMatch[1].match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/g);
+                                if (hiResMatches) {
+                                    extractedImages = hiResMatches
+                                        .map(m => m.match(/"(https:\/\/[^"]+)"/)?.[1])
+                                        .filter((url): url is string => !!url);
+                                }
+                            }
+                        }
+
+                        // STRATEGY C: Global HiRes Scan (Fallback) - Only if A & B failed
+                        if (extractedImages.length === 0) {
+                            // Look for ANY "hiRes":"..." pattern in the entire HTML safely
+                            // (We limit to .jpg/.png to ensure they are images)
+                            const globalHiRes = html.match(/"hiRes"\s*:\s*"(https:\/\/[^"]+\.(?:jpg|png|jpeg))"/gi);
+                            if (globalHiRes) {
+                                extractedImages = globalHiRes
+                                    .map(m => m.match(/"(https:\/\/[^"]+)"/)?.[1])
+                                    .filter((url): url is string => !!url);
+                            }
+                        }
+
+                        // STRATEGY D: imageGalleryData (Newest Layouts)
                         if (extractedImages.length === 0) {
                             const galleryMatch = html.match(/imageGalleryData\s*:\s*(\[[\s\S]*?\])/);
                             if (galleryMatch) {
@@ -1096,8 +1144,10 @@ export default defineContentScript({
                     }
                 }));
 
-                // Politeness delay - Reduced for faster loading
-                await new Promise(r => setTimeout(r, 300));
+                // Politeness delay: 0ms for Fast Mode, 300ms for Background Mode
+                if (!fastMode) {
+                    await new Promise(r => setTimeout(r, 300));
+                }
             }
 
             // Notify UI ONLY once after all fetching is complete to prevent continuous refreshing/blinking
@@ -1193,6 +1243,7 @@ export default defineContentScript({
 
                 // Reconstruct maps from the variants array
                 variants.forEach(v => {
+                    v.isLoading = deepFetchQueue.has(v.asin); // Pass loading status to UI
                     if (v.images && v.images.length > 0) {
                         scrapedVariantImagesByAsin[v.asin] = v.images;
                     }
