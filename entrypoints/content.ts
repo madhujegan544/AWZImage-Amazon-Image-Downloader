@@ -485,6 +485,17 @@ export default defineContentScript({
                 sendResponse({ success: true });
             }
 
+            if (message.type === 'AWAIT_DEEP_FETCH') {
+                const checkQueue = async () => {
+                    while (deepFetchQueue.size > 0) {
+                        await new Promise(r => setTimeout(r, 300));
+                    }
+                    return true;
+                };
+                checkQueue().then(() => sendResponse({ success: true }));
+                return true; // Keep channel open
+            }
+
             if (message.type === 'SELECT_VARIANT') {
                 try {
                     const asin = message.asin;
@@ -974,6 +985,127 @@ export default defineContentScript({
         let lastScrapedAsin = '';
         let lastFetchedReviewAsin = '';
 
+
+        // ==========================================
+        // DEEP FETCH LOGIC (Background Variant Enrichment)
+        // ==========================================
+        const deepFetchQueue = new Set<string>();
+        // @ts-ignore
+        if (!window._amzVisitedAsins) window._amzVisitedAsins = new Set<string>();
+        // @ts-ignore
+        const visitedAsins = window._amzVisitedAsins as Set<string>;
+
+        async function deepFetchVariantImages(variants: VariantItem[]) {
+            // @ts-ignore
+            if (!window._amzImageCache) window._amzImageCache = {};
+            // @ts-ignore
+            const cache = window._amzImageCache as Record<string, string[]>;
+
+            // Filter variants that need fetching:
+            // 1. Not currently being fetched (Queue)
+            // 2. Not already attempted/visited (Visited Set) - CRITICAL FIX FOR LOOP
+            // 3. Not currently cached with sufficient data
+            // 4. Not the current ASIN
+            const currentAsin = getCurrentAsin();
+            const targets = variants.filter(v => {
+                const isVisited = visitedAsins.has(v.asin);
+                const isQueued = deepFetchQueue.has(v.asin);
+                const hasCache = cache[v.asin] && cache[v.asin].length >= 3;
+
+                // If we already visited it, don't try again even if cache is empty
+                if (isVisited) return false;
+
+                return !hasCache && !isQueued && v.asin !== currentAsin;
+            });
+
+            if (targets.length === 0) return;
+
+            console.log(`AMZImage: Starting deep fetch for ${targets.length} variants...`);
+
+            // Process in chunks
+            // Process in chunks - Increased for speed (6 parallel requests is standard browser limit)
+            const CHUNK_SIZE = 6;
+            for (let i = 0; i < targets.length; i += CHUNK_SIZE) {
+                const chunk = targets.slice(i, i + CHUNK_SIZE);
+
+                await Promise.all(chunk.map(async (variant) => {
+                    deepFetchQueue.add(variant.asin);
+                    visitedAsins.add(variant.asin); // Mark as attempted immediately
+                    try {
+                        const url = `/dp/${variant.asin}?psc=1`;
+                        const response = await fetch(url);
+                        if (!response.ok) throw new Error('Fetch failed');
+                        const html = await response.text();
+                        let extractedImages: string[] = [];
+
+                        // Strategy: Parse ONLY the script tags to find ImageBlockATF
+                        // This prevents capturing "hiRes" urls from sponsored products, carousels, or other widgets
+                        const scriptRegex = /<script[^>]*>([\s\S]*?)<\/script>/gi;
+                        let match;
+                        while ((match = scriptRegex.exec(html)) !== null) {
+                            const scriptContent = match[1];
+
+                            // Target the specific data block for the main gallery
+                            if (scriptContent.includes('ImageBlockATF') || scriptContent.includes("'colorImages'")) {
+                                const hiResMatches = scriptContent.match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/g);
+                                if (hiResMatches) {
+                                    const found = hiResMatches
+                                        .map(m => m.match(/"(https:\/\/[^"]+)"/)?.[1])
+                                        .filter((url): url is string => !!url);
+
+                                    // If we found a good chunk of images, this is likely the main gallery
+                                    if (found.length > 0) {
+                                        extractedImages = found;
+                                        break; // Stop immediately to avoid polluting with other scripts
+                                    }
+                                }
+                            }
+                        }
+
+                        // Fallback Strategy: Look for imageGalleryData (Newer layouts) if strict script parsing failed
+                        if (extractedImages.length === 0) {
+                            const galleryMatch = html.match(/imageGalleryData\s*:\s*(\[[\s\S]*?\])/);
+                            if (galleryMatch) {
+                                const urls = galleryMatch[1].match(/"mainUrl"\s*:\s*"(https:\/\/[^"]+)"/g);
+                                if (urls) {
+                                    extractedImages = urls
+                                        .map(m => m.match(/"(https:\/\/[^"]+)"/)?.[1])
+                                        .filter((url): url is string => !!url);
+                                }
+                            }
+                        }
+
+                        if (extractedImages.length > 0) {
+                            // Clean up URLs
+                            const cleanImages = extractedImages.map(url => {
+                                // Simple quality maximization
+                                return url.replace(/\._[A-Z]{2,4}[0-9]+_/, '');
+                            });
+
+                            // Deduplicate
+                            const uniqueImages = [...new Set(cleanImages)];
+
+                            // Update Global Cache
+                            cache[variant.asin] = uniqueImages;
+                            // console.log(`AMZImage: Deep fetched ${uniqueImages.length} images for ${variant.asin}`);
+                        }
+                    } catch (e) {
+                        // console.warn(`AMZImage: Failed deep fetch for ${variant.asin}`, e);
+                    } finally {
+                        deepFetchQueue.delete(variant.asin);
+                    }
+                }));
+
+                // Politeness delay - Reduced for faster loading
+                await new Promise(r => setTimeout(r, 300));
+            }
+
+            // Notify UI ONLY once after all fetching is complete to prevent continuous refreshing/blinking
+            if (targets.length > 0) {
+                notifyContentChange('deep_fetch_complete');
+            }
+        }
+
         async function scrapeProductData(triggerScroll: boolean = false): Promise<ProductData> {
             const productImages: string[] = [];
             const variantImagesMap: Record<string, string[]> = {};
@@ -1054,6 +1186,10 @@ export default defineContentScript({
                 // scrapeVariants returns VariantItem[] directly
                 const scrapedVariants = scrapeVariants(isHoveringVariant);
                 variants = scrapedVariants;
+
+                // TRIGGER DEEP FETCH (Background)
+                // This will silently fill the cache and update the UI incrementally
+                deepFetchVariantImages(variants).catch(e => console.error("Deep fetch error:", e));
 
                 // Reconstruct maps from the variants array
                 variants.forEach(v => {

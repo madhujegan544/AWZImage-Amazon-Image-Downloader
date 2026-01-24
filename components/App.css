@@ -10,29 +10,30 @@
    Design Tokens
    ============================================ */
 :root {
-    /* Primary Colors */
-    --primary: #2563EB;
-    --primary-hover: #1D4ED8;
-    --primary-active: #1E40AF;
-    --primary-soft: #EFF6FF;
-    --primary-glow: rgba(37, 99, 235, 0.15);
+    /* Primary Colors - Softer Indigo/Blue */
+    --primary: #4F46E5;
+    --primary-hover: #4338CA;
+    --primary-active: #3730A3;
+    --primary-soft: #EEF2FF;
+    --primary-glow: rgba(79, 70, 229, 0.12);
 
-    /* Surfaces */
+    /* Surfaces - Clean & Bright */
     --surface: #FFFFFF;
     --surface-elevated: #FFFFFF;
-    --background: #F8FAFC;
-    --background-secondary: #F1F5F9;
+    --background: #FAFAFA;
+    --background-secondary: #F3F4F6;
 
-    /* Text */
-    --text: #0F172A;
-    --text-secondary: #475569;
-    --text-muted: #94A3B8;
+    /* Text - Softer Contrast relative to white */
+    --text: #1F2937;
+    --text-secondary: #6B7280;
+    --text-muted: #9CA3AF;
     --text-inverse: #FFFFFF;
 
-    /* Borders */
-    --border: #E2E8F0;
-    --border-light: #F1F5F9;
-    --border-focus: #2563EB;
+    /* Borders - Subtle */
+    --border: #F3F4F6;
+    /* Much lighter border for subtle separation */
+    --border-light: #F9FAFB;
+    --border-focus: #4F46E5;
 
     /* Semantic */
     --success: #10B981;
@@ -40,20 +41,20 @@
     --warning: #F59E0B;
     --error: #EF4444;
 
-    /* Shadows */
-    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.04);
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
-    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -1px rgba(0, 0, 0, 0.04);
-    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -2px rgba(0, 0, 0, 0.04);
-    --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.08), 0 10px 10px -5px rgba(0, 0, 0, 0.03);
-    --shadow-primary: 0 4px 14px rgba(37, 99, 235, 0.25);
+    /* Shadows - Softer & Diffused */
+    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.03);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.05), 0 1px 2px rgba(0, 0, 0, 0.03);
+    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.02);
+    --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.05), 0 10px 10px -5px rgba(0, 0, 0, 0.01);
+    --shadow-primary: 0 4px 14px rgba(79, 70, 229, 0.2);
 
-    /* Radii */
-    --radius-xs: 4px;
-    --radius-sm: 6px;
-    --radius-md: 10px;
-    --radius-lg: 14px;
-    --radius-xl: 20px;
+    /* Radii - Slightly more rounded for friendly feel */
+    --radius-xs: 6px;
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-lg: 16px;
+    --radius-xl: 24px;
     --radius-full: 9999px;
 
     /* Spacing Scale */
@@ -67,9 +68,10 @@
 
     /* Typography */
     --font-family: 'Google Sans', 'Segoe UI', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-    --font-size-xs: 10px;
-    --font-size-sm: 11px;
+    --font-size-xs: 11px;
+    --font-size-sm: 12px;
     --font-size-base: 13px;
+    /* Slightly larger base for readability */
     --font-size-md: 14px;
     --font-size-lg: 16px;
     --font-size-xl: 18px;
@@ -80,9 +82,9 @@
     --font-weight-semibold: 600;
     --font-weight-bold: 700;
 
-    --line-height-tight: 1.2;
-    --line-height-normal: 1.5;
-    --line-height-relaxed: 1.6;
+    --line-height-tight: 1.25;
+    --line-height-normal: 1.6;
+    --line-height-relaxed: 1.75;
 
     /* Transitions */
     --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
@@ -91,7 +93,8 @@
     --transition-bounce: 400ms cubic-bezier(0.34, 1.56, 0.64, 1);
 
     /* Layout */
-    --header-height: 52px;
+    --header-height: 56px;
+    /* Slightly taller for breathing room */
     --footer-height: 72px;
     --panel-width: 380px;
 }
@@ -332,6 +335,8 @@ video {
 }
 
 .no-scrollbar {
-    -ms-overflow-style: none;  /* IE and Edge */
-    scrollbar-width: none;  /* Firefox */
+    -ms-overflow-style: none;
+    /* IE and Edge */
+    scrollbar-width: none;
+    /* Firefox */
 }

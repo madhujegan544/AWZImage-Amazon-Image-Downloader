@@ -5,6 +5,7 @@
  */
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { browser } from 'wxt/browser';
 import './App.css';
 import Welcome from './Welcome';
 import Login from './Login';
@@ -69,32 +70,32 @@ type SubTab = 'images' | 'videos';
 // Design Tokens
 // ============================================
 const COLORS = {
-    primary: '#2563EB',
-    primaryHover: '#1D4ED8',
-    primarySoft: '#EFF6FF',
-    primaryGlow: 'rgba(37, 99, 235, 0.15)',
+    primary: '#4F46E5', // Indigo 600 - Softer than pure blue
+    primaryHover: '#4338CA', // Indigo 700
+    primarySoft: '#EEF2FF', // Indigo 50
+    primaryGlow: 'rgba(79, 70, 229, 0.12)',
 
     surface: '#FFFFFF',
-    background: '#F8FAFC',
-    backgroundSecondary: '#F1F5F9',
+    background: '#FAFAFA', // Gray 50
+    backgroundSecondary: '#F3F4F6', // Gray 100
 
-    text: '#0F172A',
-    textSecondary: '#475569',
-    textMuted: '#94A3B8',
+    text: '#1F2937', // Gray 800 - Softer than black
+    textSecondary: '#6B7280', // Gray 500
+    textMuted: '#9CA3AF', // Gray 400
     textInverse: '#FFFFFF',
 
-    border: '#E2E8F0',
-    borderLight: '#F1F5F9',
+    border: '#F3F4F6', // Very subtle border
+    borderLight: '#F9FAFB',
 
     success: '#10B981',
     successSoft: '#ECFDF5',
     warning: '#F59E0B',
     warningSoft: '#FFFBEB',
 
-    shadowSm: '0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04)',
-    shadowMd: '0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -1px rgba(0, 0, 0, 0.04)',
-    shadowLg: '0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -2px rgba(0, 0, 0, 0.04)',
-    shadowPrimary: '0 4px 14px rgba(37, 99, 235, 0.25)',
+    shadowSm: '0 1px 2px 0 rgba(0, 0, 0, 0.05)',
+    shadowMd: '0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03)',
+    shadowLg: '0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.02)',
+    shadowPrimary: '0 4px 14px 0 rgba(79, 70, 229, 0.15)',
 };
 
 const INITIAL_ITEMS_COUNT = 6;
@@ -407,7 +408,12 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     // Data Loading
     // ============================================
     const loadData = useCallback(async (triggerScroll: boolean = false) => {
-        setLoading(true);
+        // Only show full loading spinner for initial load or manual scroll refresh
+        // Background updates (triggerScroll=false) should be silent
+        if (triggerScroll) {
+            setLoading(true);
+        }
+
         setError(null);
         try {
             const rawData = await scrapeProductData(triggerScroll);
@@ -426,7 +432,9 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             setError('Failed to load product data');
             console.error(err);
         } finally {
-            setLoading(false);
+            if (triggerScroll) {
+                setLoading(false);
+            }
         }
     }, [scrapeProductData]);
 
@@ -492,6 +500,25 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
         return () => clearInterval(fastPollInterval);
     }, [downloading, selectingVariant, productData?.asin, productData?.pageType, scrapeProductData]);
+
+    // Listener for content changes (immediate updates)
+    useEffect(() => {
+        const handleMessage = (message: any) => {
+            // Listen for variant changes or other scraped content updates
+            if (message.type === 'CONTENT_CHANGED' || message.type === 'active_image_changed') {
+                // console.log('Received refresh signal:', message.reason);
+                loadData(false); // Refresh data without scrolling
+            }
+        };
+
+        // Add listener
+        browser.runtime.onMessage.addListener(handleMessage);
+
+        // Cleanup
+        return () => {
+            browser.runtime.onMessage.removeListener(handleMessage);
+        };
+    }, [loadData]);
 
     // Close dropdown when clicking outside
     useEffect(() => {
@@ -576,6 +603,25 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     const downloadAll = async () => {
         if (!productData) return;
 
+        setDownloading(true);
+        setDownloadSuccess(false);
+
+        let finalData: ProductData | null = productData;
+
+        try {
+            // Ensure background deep fetch matches are finished
+            await browser.runtime.sendMessage({ type: 'AWAIT_DEEP_FETCH' });
+            // Refresh local state one last time to get the full gallery
+            const rawData = await scrapeProductData(false);
+            if (rawData) {
+                const enriched = enrichProductData(rawData);
+                setProductData(enriched);
+                finalData = enriched;
+            }
+        } catch (e) {
+            console.warn("Deep fetch wait failed", e);
+        }
+
         let items: (string | { url: string; filename: string })[] = [];
         let categoryLabel = `${mainTab}-${subTab}`;
 
@@ -583,14 +629,15 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         const hasVariantsWithImages = isProductPage &&
             mainTab === 'product' &&
             subTab === 'images' &&
-            productData.variantImages &&
-            Object.keys(productData.variantImages).length > 0 &&
-            Object.values(productData.variantImages).some(urls => urls && urls.length > 0);
+            finalData &&
+            finalData.variantImages &&
+            Object.keys(finalData.variantImages).length > 0 &&
+            Object.values(finalData.variantImages).some(urls => urls && urls.length > 0);
 
         // If downloading product images (page-specific), structure it by variants
-        if (hasVariantsWithImages) {
+        if (hasVariantsWithImages && finalData) {
             // Iterate through ALL enriched variants to get their full image sets
-            productData.variants.forEach(variant => {
+            finalData.variants.forEach(variant => {
                 const vUrls = variant.images || [];
                 if (vUrls.length === 0) return;
 
@@ -860,7 +907,6 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         </div>
     );
 
-    // Two-Level Category Navigation
     const renderCategoryTabs = () => {
         const productTotal = categoryCounts.productImages + categoryCounts.productVideos;
         const reviewTotal = categoryCounts.reviewImages + categoryCounts.reviewVideos;
@@ -868,14 +914,15 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         return (
             <div style={{
                 background: COLORS.surface,
-                borderBottom: `1px solid ${COLORS.borderLight}`,
-                padding: '0'
+                borderBottom: `1px solid ${COLORS.border}`,
+                paddingBottom: '8px'
             }}>
-                {/* Main Tabs: Product / Review */}
+                {/* Main Tabs: Product / Review - Cleaner Text Tabs */}
                 <div style={{
                     display: 'flex',
-                    background: '#fff',
-                    padding: '0 10px'
+                    background: COLORS.surface,
+                    padding: '4px 16px 0 16px',
+                    borderBottom: `1px solid ${COLORS.borderLight}`
                 }}>
                     {[
                         { key: 'product' as MainTab, label: 'Product', count: productTotal },
@@ -895,26 +942,27 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 alignItems: 'center',
                                 justifyContent: 'center',
                                 gap: '8px',
-                                padding: '16px 8px',
+                                padding: '14px 4px',
                                 border: 'none',
                                 borderBottom: mainTab === tab.key ? `2px solid ${COLORS.primary}` : '2px solid transparent',
                                 background: 'transparent',
-                                color: mainTab === tab.key ? COLORS.primary : '#64748B',
-                                fontSize: '15px',
-                                fontWeight: 700,
+                                color: mainTab === tab.key ? COLORS.primary : COLORS.textSecondary,
+                                fontSize: '14px',
+                                fontWeight: mainTab === tab.key ? 600 : 500,
                                 cursor: tab.count === 0 ? 'not-allowed' : 'pointer',
-                                opacity: tab.count === 0 ? 0.4 : 1,
+                                opacity: tab.count === 0 ? 0.5 : 1,
                                 transition: 'all 0.2s ease',
+                                marginBottom: '-1px' // Overlap border
                             }}
                         >
                             {tab.label}
                             <span style={{
-                                background: mainTab === tab.key ? COLORS.primary : '#E2E8F0',
-                                color: mainTab === tab.key ? '#fff' : '#64748B',
-                                padding: '2px 8px',
-                                borderRadius: '10px',
-                                fontSize: '11px',
-                                fontWeight: 700
+                                background: mainTab === tab.key ? COLORS.primarySoft : COLORS.backgroundSecondary,
+                                color: mainTab === tab.key ? COLORS.primary : COLORS.textMuted,
+                                padding: '1px 6px',
+                                borderRadius: '6px',
+                                fontSize: '10px',
+                                fontWeight: 600
                             }}>
                                 {tab.count}
                             </span>
@@ -922,12 +970,12 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     ))}
                 </div>
 
-                {/* Sub Tabs: Images / Videos */}
+                {/* Sub Tabs: Images / Videos - Rounded Pills */}
                 <div style={{
                     display: 'flex',
-                    gap: '12px',
-                    padding: '12px 14px',
-                    background: '#F8FAFC'
+                    gap: '8px',
+                    padding: '12px 14px 4px 14px',
+                    background: COLORS.surface
                 }}>
                     {[
                         {
@@ -956,34 +1004,22 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 alignItems: 'center',
                                 justifyContent: 'center',
                                 gap: '8px',
-                                padding: '12px 14px',
-                                borderRadius: '12px',
-                                border: 'none',
-                                background: subTab === sub.key ? '#FFFFFF' : 'transparent',
-                                color: subTab === sub.key ? '#1E293B' : '#64748B',
-                                fontSize: '14px',
-                                fontWeight: 600,
+                                padding: '8px 12px',
+                                borderRadius: '8px',
+                                border: `1px solid ${subTab === sub.key ? COLORS.primarySoft : 'transparent'}`,
+                                background: subTab === sub.key ? COLORS.primarySoft : COLORS.background,
+                                color: subTab === sub.key ? COLORS.primary : COLORS.textSecondary,
+                                fontSize: '13px',
+                                fontWeight: 500,
                                 cursor: sub.count === 0 ? 'not-allowed' : 'pointer',
-                                opacity: sub.count === 0 ? 0.4 : 1,
+                                opacity: sub.count === 0 ? 0.5 : 1,
                                 transition: 'all 0.2s ease',
-                                boxShadow: subTab === sub.key ? '0 1px 3px rgba(0,0,0,0.1), 0 1px 2px rgba(0,0,0,0.06)' : 'none'
                             }}
                         >
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                                 <path d={sub.icon} />
                             </svg>
                             {sub.label}
-                            <span style={{
-                                background: subTab === sub.key ? COLORS.primary : '#E2E8F0',
-                                color: subTab === sub.key ? '#fff' : '#64748B',
-                                padding: '1px 7px',
-                                borderRadius: '8px',
-                                fontSize: '11px',
-                                fontWeight: 700,
-                                marginLeft: '2px'
-                            }}>
-                                {sub.count}
-                            </span>
                         </button>
                     ))}
                 </div>
@@ -1030,7 +1066,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 <div style={{
                     display: 'grid',
                     gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
-                    gap: '10px'
+                    gap: '12px'
                 }}>
                     {allVariants.map((variant, index) => {
                         const isCurrent = selectedVariantAsin ? variant.asin === selectedVariantAsin : variant.selected;
@@ -1058,8 +1094,6 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             previewImages = [thumbnail, thumbnail];
                         }
 
-                        const remainingCount = imageCount > 2 ? imageCount - 2 : 0;
-
                         return (
                             <div
                                 key={variant.asin}
@@ -1072,13 +1106,15 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 style={{
                                     display: 'flex',
                                     flexDirection: 'column',
-                                    gap: '8px',
+                                    gap: '10px',
                                     padding: '12px',
-                                    borderRadius: '10px',
-                                    background: isCurrent ? COLORS.primarySoft : COLORS.surface,
-                                    border: isCurrent ? `2px solid ${COLORS.primary}` : `1px solid ${COLORS.border}`,
+                                    borderRadius: '12px',
+                                    background: isCurrent ? COLORS.surface : COLORS.surface,
+                                    border: isCurrent ? `1.5px solid ${COLORS.primary}` : `1px solid ${COLORS.border}`,
+                                    boxShadow: isCurrent ? COLORS.shadowPrimary : COLORS.shadowSm,
                                     cursor: selectingVariant ? 'wait' : isCurrent ? 'default' : 'pointer',
-                                    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
+                                    transition: 'all 0.2s ease',
+                                    opacity: isUnavailable ? 0.7 : 1
                                 }}
                                 className={!isCurrent ? 'variant-option-hover' : ''}
                             >
@@ -1093,28 +1129,29 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                     }}>
                                         <div style={{
                                             fontSize: '10px',
-                                            fontWeight: 600,
-                                            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+                                            fontWeight: 500,
+                                            fontFamily: 'ui-monospace, monospace',
                                             color: isCurrent ? COLORS.primary : COLORS.textMuted,
-                                            opacity: 0.8,
-                                            letterSpacing: '0.2px'
+                                            background: isCurrent ? COLORS.primarySoft : 'transparent',
+                                            padding: isCurrent ? '2px 6px' : '0',
+                                            borderRadius: '4px'
                                         }}>
                                             {variant.asin}
                                         </div>
                                     </div>
 
-                                    {/* Variant Name - Bold and prominent */}
+                                    {/* Variant Name - Clean and readable */}
                                     <div style={{
-                                        fontSize: '14px',
-                                        fontWeight: 700,
+                                        fontSize: '13px',
+                                        fontWeight: 600,
                                         color: COLORS.text,
-                                        lineHeight: '1.25',
+                                        lineHeight: '1.4',
                                         marginBottom: '10px',
                                         display: '-webkit-box',
                                         WebkitLineClamp: 2,
                                         WebkitBoxOrient: 'vertical',
                                         overflow: 'hidden',
-                                        height: '35px'
+                                        height: '36px'
                                     }}>
                                         {variant.name}
                                     </div>
@@ -1129,82 +1166,105 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                             gap: '6px',
                                             paddingBottom: '4px',
                                             scrollBehavior: 'smooth',
-                                            scrollbarWidth: 'none', // Firefox
-                                            msOverflowStyle: 'none' // IE/Edge
+                                            scrollbarWidth: 'none',
+                                            msOverflowStyle: 'none'
                                         }}
                                         className="no-scrollbar"
                                     >
-                                        {/* Render ALL images in scrollable list */}
-                                        {displayImages.length > 0 ? (
-                                            displayImages.map((img, idx) => (
+                                        {/* Render images - Guarantee at least 2 for visual balance */}
+                                        {(displayImages.length >= 2 ? displayImages :
+                                            displayImages.length === 1 ? [displayImages[0], displayImages[0]] :
+                                                thumbnail ? [thumbnail, thumbnail] : []
+                                        ).length > 0 ? (
+                                            (displayImages.length >= 2 ? displayImages :
+                                                displayImages.length === 1 ? [displayImages[0], displayImages[0]] :
+                                                    [thumbnail, thumbnail]
+                                            ).map((img, idx) => (
                                                 <div key={idx} style={{
-                                                    flex: '0 0 33%', // Shows ~3 items (approx)
+                                                    flex: '0 0 33%',
                                                     aspectRatio: '1',
-                                                    borderRadius: '8px',
+                                                    borderRadius: '6px',
                                                     background: `url(${img}) center/contain no-repeat`,
-                                                    backgroundColor: '#fafafa',
-                                                    border: `1px solid rgba(0,0,0,0.06)`,
-                                                    boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.04)',
-                                                    transition: 'transform 0.2s ease, box-shadow 0.2s ease',
-                                                    cursor: 'zoom-in'
+                                                    backgroundColor: COLORS.backgroundSecondary,
+                                                    border: `1px solid ${COLORS.border}`,
+                                                    transition: 'transform 0.2s ease',
+                                                    cursor: 'zoom-in',
+                                                    position: 'relative' // For loader overlay
                                                 }}
                                                     onClick={(e) => {
                                                         e.stopPropagation();
-                                                        if (showPreview) showPreview(img, 'image', displayImages);
+                                                        if (showPreview) showPreview(img, 'image', displayImages.length > 0 ? displayImages : [img]);
                                                     }}
                                                     className="variant-thumb"
-                                                />
+                                                >
+                                                    {/* Show loader ONLY on the second slot if data is incomplete (waiting for deep fetch) */}
+                                                    {displayImages.length < 2 && idx === 1 && (
+                                                        <div style={{
+                                                            position: 'absolute',
+                                                            top: 0, left: 0, right: 0, bottom: 0,
+                                                            background: 'rgba(255,255,255,0.6)',
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            justifyContent: 'center',
+                                                            borderRadius: '6px'
+                                                        }}>
+                                                            <div className="spinner-mini" style={{
+                                                                width: '12px',
+                                                                height: '12px',
+                                                                border: `2px solid ${COLORS.primary}`,
+                                                                borderTopColor: 'transparent',
+                                                                borderRadius: '50%',
+                                                                animation: 'spin 1s linear infinite'
+                                                            }} />
+                                                        </div>
+                                                    )}
+                                                </div>
                                             ))
                                         ) : (
                                             /* No images - show placeholder */
                                             <div style={{
                                                 width: '100%',
-                                                height: '60px', // Approx height of thumbs
-                                                borderRadius: '8px',
+                                                height: '50px',
+                                                borderRadius: '6px',
                                                 background: COLORS.backgroundSecondary,
-                                                border: `1px dashed rgba(0,0,0,0.1)`,
                                                 display: 'flex',
                                                 alignItems: 'center',
                                                 justifyContent: 'center'
                                             }}>
-                                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={COLORS.textMuted} strokeWidth="1.5">
-                                                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                                                    <circle cx="8.5" cy="8.5" r="1.5" />
-                                                    <polyline points="21 15 16 10 5 21" />
-                                                </svg>
+                                                <span style={{ fontSize: '10px', color: COLORS.textMuted }}>No preview</span>
                                             </div>
                                         )}
                                     </div>
 
-                                    {/* Image Count Label - NEW */}
+                                    {/* Image Count Label */}
                                     <div style={{
-                                        marginTop: '8px',
-                                        fontSize: '10px',
-                                        fontWeight: 600,
-                                        color: COLORS.textMuted,
-                                        textAlign: 'right'
+                                        marginTop: '6px',
+                                        display: 'flex',
+                                        justifyContent: 'space-between',
+                                        alignItems: 'center'
                                     }}>
-                                        {imageCount} Image{imageCount !== 1 ? 's' : ''} Available
+                                        <div style={{
+                                            fontSize: '10px',
+                                            fontWeight: 500,
+                                            color: COLORS.textMuted
+                                        }}>
+                                            {imageCount} Images
+                                        </div>
                                     </div>
 
-                                    {/* Download Button Overlay */}
+                                    {/* Download Button Overlay - Cleaner */}
                                     {imageCount > 0 && (
                                         <button
                                             onClick={(e) => {
                                                 e.stopPropagation();
-                                                // Prevent download if still loading variant data
                                                 if (selectingVariant) return;
-
-                                                // Use the variant's own enriched images (background fetched)
                                                 const imagesToDownload = variant.images || [];
-
                                                 if (imagesToDownload.length > 0) {
                                                     const filename = `pixora-${productData?.asin || 'product'}-${variant.name.replace(/[^a-zA-Z0-9]/g, '_')}-${Date.now()}`;
                                                     downloadZip(imagesToDownload, filename);
                                                 }
                                             }}
                                             onMouseEnter={async () => {
-                                                // On hover, select this variant to load all its images
                                                 if (!isCurrent && !selectingVariant && !isUnavailable) {
                                                     handleVariantSelect(variant.asin, variant.name);
                                                 }
@@ -1213,21 +1273,21 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                             className="variant-download-btn"
                                             style={{
                                                 position: 'absolute',
-                                                bottom: '22px', // Moved up slightly to accommodate label
-                                                right: '6px',
-                                                width: '24px',
-                                                height: '24px',
-                                                borderRadius: '6px',
-                                                background: selectingVariant ? COLORS.backgroundSecondary : '#fff',
+                                                bottom: '8px',
+                                                right: '0px',
+                                                width: '26px',
+                                                height: '26px',
+                                                borderRadius: '50%',
+                                                background: COLORS.surface,
                                                 border: `1px solid ${COLORS.border}`,
                                                 display: 'flex',
                                                 alignItems: 'center',
                                                 justifyContent: 'center',
                                                 cursor: selectingVariant ? 'wait' : 'pointer',
                                                 boxShadow: COLORS.shadowSm,
-                                                color: selectingVariant ? COLORS.textMuted : COLORS.text,
+                                                color: COLORS.textSecondary,
                                                 transition: 'all 0.2s ease',
-                                                opacity: selectingVariant ? 0.7 : 1
+                                                zIndex: 5
                                             }}
                                             title={selectingVariant ? 'Loading variant...' : `Download ${imageCount} image${imageCount > 1 ? 's' : ''}`}
                                         >
@@ -1325,27 +1385,27 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     onClick={(e) => toggleSelection(item.url, e)}
                     style={{
                         position: 'absolute',
-                        top: '6px',
-                        right: '6px',
-                        width: '22px',
-                        height: '22px',
+                        top: '8px',
+                        right: '8px',
+                        width: '24px',
+                        height: '24px',
                         borderRadius: '50%',
-                        background: isSelected ? COLORS.primary : 'rgba(255,255,255,0.75)',
+                        background: isSelected ? COLORS.primary : 'rgba(255,255,255,0.8)',
                         backdropFilter: 'blur(4px)',
                         WebkitBackdropFilter: 'blur(4px)',
                         border: isSelected ? 'none' : `1.5px solid rgba(0,0,0,0.1)`,
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        boxShadow: isSelected ? `0 4px 10px ${COLORS.primaryGlow}` : COLORS.shadowSm,
+                        boxShadow: isSelected ? COLORS.shadowMd : COLORS.shadowSm,
                         transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
-                        transform: isSelected ? 'scale(1.1)' : 'scale(1)',
+                        transform: isSelected ? 'scale(1.05)' : 'scale(1)',
                         cursor: 'pointer',
                         zIndex: 10
                     }}
                 >
                     {isSelected && (
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
                             <polyline points="20 6 9 17 4 12" />
                         </svg>
                     )}
@@ -1452,13 +1512,13 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                         onClick={(e) => toggleSelection(product.image, e)}
                         style={{
                             position: 'absolute',
-                            top: '6px',
-                            right: '6px',
-                            width: '20px',
-                            height: '20px',
-                            borderRadius: '6px',
-                            background: isSelected ? COLORS.primary : 'rgba(255,255,255,0.95)',
-                            border: isSelected ? 'none' : `2px solid ${COLORS.border}`,
+                            top: '8px',
+                            right: '8px',
+                            width: '24px',
+                            height: '24px',
+                            borderRadius: '50%',
+                            background: isSelected ? COLORS.primary : 'rgba(255,255,255,0.9)',
+                            border: isSelected ? 'none' : `1px solid ${COLORS.border}`,
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'center',
@@ -1468,7 +1528,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                         }}
                     >
                         {isSelected && (
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3">
                                 <polyline points="20 6 9 17 4 12" />
                             </svg>
                         )}
@@ -1578,17 +1638,16 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             color: COLORS.text,
             overflow: 'hidden'
         }}>
-            {/* HEADER - Glassmorphic with gradient shadow */}
+            {/* HEADER - Clean and Minimal */}
             <header style={{
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
-                padding: '12px 14px',
-                background: 'rgba(255, 255, 255, 0.92)',
-                backdropFilter: 'blur(16px)',
-                WebkitBackdropFilter: 'blur(16px)',
-                borderBottom: `1px solid rgba(0,0,0,0.05)`,
-                boxShadow: '0 4px 20px -4px rgba(0, 0, 0, 0.08)',
+                padding: '10px 16px',
+                background: 'rgba(255, 255, 255, 0.95)',
+                backdropFilter: 'blur(12px)',
+                WebkitBackdropFilter: 'blur(12px)',
+                borderBottom: `1px solid ${COLORS.border}`,
                 flexShrink: 0,
                 position: 'sticky',
                 top: 0,
@@ -1596,34 +1655,31 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                     <div style={{
-                        width: '34px',
-                        height: '34px',
-                        borderRadius: '10px',
-                        background: `linear-gradient(135deg, ${COLORS.primary} 0%, #3B82F6 50%, #60A5FA 100%)`,
+                        width: '32px',
+                        height: '32px',
+                        borderRadius: '8px',
+                        background: COLORS.primary,
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        boxShadow: '0 4px 12px -2px rgba(37, 99, 235, 0.4)',
-                        transition: 'transform 0.3s ease, box-shadow 0.3s ease'
+                        boxShadow: COLORS.shadowSm,
+                        color: 'white'
                     }} className="header-logo">
-                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                             <polyline points="7 10 12 15 17 10" />
                             <line x1="12" y1="15" x2="12" y2="3" />
                         </svg>
                     </div>
-                    <div>
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
                         <h1 style={{
-                            fontSize: '16px',
-                            fontWeight: 800,
-                            background: 'linear-gradient(135deg, #1E40AF 0%, #2563EB 50%, #3B82F6 100%)',
-                            WebkitBackgroundClip: 'text',
-                            WebkitTextFillColor: 'transparent',
-                            backgroundClip: 'text',
+                            fontSize: '15px',
+                            fontWeight: 700,
+                            color: COLORS.text,
                             lineHeight: 1.1,
-                            letterSpacing: '-0.3px'
+                            letterSpacing: '-0.2px'
                         }}>Pixora</h1>
-                        <p style={{ fontSize: '9px', color: COLORS.textMuted, fontWeight: 500, letterSpacing: '0.2px' }}>Amazon Media</p>
+                        <p style={{ fontSize: '10px', color: COLORS.textMuted, fontWeight: 500 }}>Amazon Media</p>
                     </div>
                 </div>
 
@@ -1767,31 +1823,30 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 className="download-main-btn"
                                 style={{
                                     flex: 1,
-                                    padding: '14px 20px',
+                                    padding: '12px 24px',
                                     background: downloadSuccess
-                                        ? `linear-gradient(135deg, ${COLORS.success} 0%, #059669 100%)`
-                                        : 'linear-gradient(135deg, #2563EB 0%, #3B82F6 50%, #60A5FA 100%)',
+                                        ? 'linear-gradient(135deg, #34D399 0%, #10B981 100%)'
+                                        : 'linear-gradient(135deg, #818CF8 0%, #6366F1 100%)',
                                     border: 'none',
-                                    borderRadius: '14px',
+                                    borderRadius: '12px',
                                     fontSize: '15px',
-                                    fontWeight: 700,
+                                    fontWeight: 600,
                                     color: '#fff',
                                     display: 'flex',
                                     alignItems: 'center',
                                     justifyContent: 'center',
-                                    gap: '10px',
+                                    gap: '12px',
                                     boxShadow: downloadSuccess
-                                        ? '0 8px 24px -6px rgba(16, 185, 129, 0.5)'
-                                        : '0 8px 24px -6px rgba(37, 99, 235, 0.5)',
+                                        ? '0 4px 12px rgba(16, 185, 129, 0.2)'
+                                        : '0 4px 12px rgba(99, 102, 241, 0.25)',
                                     cursor: downloading ? 'not-allowed' : 'pointer',
-                                    transition: 'all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)',
+                                    transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
                                     transform: downloading ? 'scale(0.98)' : 'scale(1)',
-                                    letterSpacing: '0.3px'
                                 }}
                             >
                                 {downloading ? (
                                     <>
-                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: 'spin 1s linear infinite' }}>
+                                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: 'spin 1s linear infinite' }}>
                                             <path d="M23 4v6h-6M1 20v-6h6" />
                                             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
                                         </svg>
@@ -1799,18 +1854,13 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                     </>
                                 ) : downloadSuccess ? (
                                     <>
-                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
                                             <polyline points="20 6 9 17 4 12" />
                                         </svg>
                                         Downloaded!
                                     </>
                                 ) : (
                                     <>
-                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                                            <polyline points="7 10 12 15 17 10" />
-                                            <line x1="12" y1="15" x2="12" y2="3" />
-                                        </svg>
                                         Download All
                                     </>
                                 )}
@@ -1818,7 +1868,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                         </div>
                     )}
                 </div>
-            )}
+            )
+            }
 
             {/* CONTENT - Reorganized based on two-level navigation */}
             <main style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -1967,14 +2018,13 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             </main>
 
             <style>{`
-                /* Header enhancements */
-                .header-logo:hover { transform: scale(1.05) rotate(-3deg); box-shadow: 0 6px 16px -2px rgba(37, 99, 235, 0.5); }
-                .refresh-btn:hover:not(:disabled) { background: ${COLORS.primarySoft} !important; border-color: ${COLORS.primary} !important; color: ${COLORS.primary} !important; transform: scale(1.05); }
-                .refresh-btn:active:not(:disabled) { transform: scale(0.95); }
+                /* Header enhancements - Subtle */
+                .refresh-btn:hover:not(:disabled) { background: ${COLORS.backgroundSecondary} !important; color: ${COLORS.text} !important; }
+                .refresh-btn:active:not(:disabled) { transform: scale(0.96); }
                 
                 /* Media grid with fade-in animation */
                 .media-item { 
-                    transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.3s ease, opacity 0.4s ease !important;
+                    transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.4s ease !important;
                     animation: fadeInScale 0.4s ease-out backwards;
                 }
                 .media-item:nth-child(1) { animation-delay: 0.02s; }
@@ -1986,30 +2036,26 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 .media-item:nth-child(7) { animation-delay: 0.14s; }
                 .media-item:nth-child(8) { animation-delay: 0.16s; }
                 .media-item:nth-child(9) { animation-delay: 0.18s; }
+                
                 .media-item:hover .media-hover-overlay { opacity: 1 !important; }
                 .media-item:hover { 
-                    transform: translateY(-4px) scale(1.02); 
-                    box-shadow: 0 12px 24px -10px rgba(0,0,0,0.28) !important;
+                    transform: translateY(-2px); 
+                    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.02) !important;
                     z-index: 5;
                 }
                 
-                /* Tab transitions */
-                .tab-indicator { transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
-                
                 /* Listing products */
                 .listing-image:hover .listing-hover-overlay { opacity: 1 !important; }
-                .listing-product { transition: transform 0.3s ease, box-shadow 0.3s ease; }
-                .listing-product:hover { transform: translateY(-4px); box-shadow: 0 12px 24px -8px rgba(0,0,0,0.15); }
+                .listing-product { transition: transform 0.2s ease, box-shadow 0.2s ease; }
+                .listing-product:hover { transform: translateY(-2px); box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05); }
                 
                 /* Variant cards */
                 .variant-option-hover:hover { 
-                    background: ${COLORS.primarySoft} !important; 
-                    border-color: ${COLORS.primary} !important; 
-                    transform: translateY(-3px); 
-                    box-shadow: 0 8px 20px -4px rgba(37, 99, 235, 0.25); 
+                    background: ${COLORS.backgroundSecondary} !important; 
+                    transform: translateY(-1px); 
                 }
-                .variant-download-btn:hover { background: ${COLORS.primary} !important; color: #fff !important; transform: translateY(-1px) scale(1.05); }
-                .variant-thumb:hover { transform: scale(1.1); box-shadow: 0 4px 12px rgba(0,0,0,0.12) !important; }
+                .variant-download-btn:hover { background: ${COLORS.primary} !important; color: #fff !important; transform: scale(1.05); }
+                .variant-thumb:hover { transform: scale(1.02); box-shadow: 0 4px 6px rgba(0,0,0,0.05) !important; }
                 
                 /* Scrollbar styling */
                 .variant-scroll::-webkit-scrollbar { height: 4px; }
@@ -2019,7 +2065,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 .scroll-container::-webkit-scrollbar-track { background: transparent; }
                 .scroll-container::-webkit-scrollbar-thumb { background: ${COLORS.border}; border-radius: 4px; }
                 
-                /* Download button */
+                /* Download button - Shimmer effect only */
                 .download-main-btn { position: relative; overflow: hidden; }
                 .download-main-btn::after { 
                     content: ''; 
@@ -2029,39 +2075,18 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     transform: translateX(-100%);
                 }
                 .download-main-btn:hover:not(:disabled)::after { animation: shimmer 1.5s infinite; }
-                .download-main-btn:hover:not(:disabled) { transform: translateY(-2px) scale(1.01) !important; box-shadow: 0 14px 32px -8px rgba(37, 99, 235, 0.55) !important; }
+                .download-main-btn:hover:not(:disabled) { transform: translateY(-1px) !important; box-shadow: 0 4px 12px rgba(79, 70, 229, 0.25) !important; }
                 .download-main-btn:active:not(:disabled) { transform: translateY(0) scale(0.98) !important; }
                 
                 /* Checkbox bounce on selection */
-                .checkbox-bounce { animation: checkBounce 0.4s cubic-bezier(0.34, 1.56, 0.64, 1); }
-                
-                /* Scroll fade indicators */
-                .scroll-fade-top { 
-                    position: relative;
-                }
-                .scroll-fade-top::before {
-                    content: '';
-                    position: absolute;
-                    top: 0;
-                    left: 0;
-                    right: 0;
-                    height: 20px;
-                    background: linear-gradient(to bottom, ${COLORS.background}, transparent);
-                    pointer-events: none;
-                    z-index: 10;
-                    opacity: 0;
-                    transition: opacity 0.3s ease;
-                }
-                .scroll-fade-top.scrolled::before { opacity: 1; }
+                .checkbox-bounce { animation: checkBounce 0.3s cubic-bezier(0.34, 1.56, 0.64, 1); }
                 
                 /* Animations */
                 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
                 @keyframes fadeInSlide { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
-                @keyframes fadeInScale { from { opacity: 0; transform: scale(0.9); } to { opacity: 1; transform: scale(1); } }
-                @keyframes progressSlide { 0% { transform: translateX(-100%); } 100% { transform: translateX(350%); } }
-                @keyframes checkBounce { 0% { transform: scale(0.8); } 50% { transform: scale(1.2); } 100% { transform: scale(1.1); } }
+                @keyframes fadeInScale { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
                 @keyframes shimmer { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
-                @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+                @keyframes checkBounce { 0% { transform: scale(0.8); } 50% { transform: scale(1.1); } 100% { transform: scale(1.0); } }
             `}</style>
         </div >
     );
