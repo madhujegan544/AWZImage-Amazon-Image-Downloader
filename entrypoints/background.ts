@@ -135,8 +135,8 @@ export default defineBackground(() => {
 // Create ZIP and return base64 data (no blob URL creation here)
 async function createZipData(items: (string | { url: string; filename: string })[], zipName: string): Promise<{ success: boolean; base64?: string; filename?: string; error?: string }> {
   const zip = new JSZip();
-  // Default folder if only strings are passed
-  const defaultFolder = zip.folder('images');
+  const imagesFolder = zip.folder('images');
+  const videosFolder = zip.folder('videos');
 
   let downloadedCount = 0;
   const fetchPromises = items.map(async (item, index) => {
@@ -159,13 +159,18 @@ async function createZipData(items: (string | { url: string; filename: string })
         const urlParts = url.split('.');
         if (urlParts.length > 1) {
           const ext = urlParts.pop()?.split('?')[0]?.toLowerCase();
-          if (ext && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'webm'].includes(ext)) {
+          if (ext && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'webm', 'm3u8'].includes(ext)) {
             extension = ext;
           }
         }
-        const isVideo = ['mp4', 'webm'].includes(extension);
+        const isVideo = ['mp4', 'webm', 'm3u8'].includes(extension);
         fileName = isVideo ? `video-${index + 1}.${extension}` : `image-${index + 1}.${extension}`;
-        defaultFolder?.file(fileName, blob);
+
+        if (isVideo) {
+          videosFolder?.file(fileName, blob);
+        } else {
+          imagesFolder?.file(fileName, blob);
+        }
       }
 
       downloadedCount++;

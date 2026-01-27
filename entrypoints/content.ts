@@ -127,7 +127,9 @@ export default defineContentScript({
         function renderIntegratedPreview() {
             if (!previewState.overlay) return;
             const url = previewState.urls[previewState.currentIndex];
-            const isVideo = url.toLowerCase().match(/\.(mp4|webm|ogg|m3u8|mpd)($|\?)/) || previewState.type === 'video';
+            const isVideoExt = url.toLowerCase().match(/\.(mp4|webm|ogg|m3u8|mpd)($|\?)/);
+            const isImageExt = url.toLowerCase().match(/\.(jpg|jpeg|png|webp|gif|bmp|tiff)($|\?)/);
+            const isVideo = isVideoExt || (!isImageExt && previewState.type === 'video');
             const count = `${previewState.currentIndex + 1} / ${previewState.urls.length}`;
             const ACCENT = '#7B7FF2';
             const ACCENT_DARK = '#666AD1';
@@ -1025,7 +1027,15 @@ export default defineContentScript({
             // @ts-ignore
             if (!window._amzImageCache) window._amzImageCache = {};
             // @ts-ignore
+            // @ts-ignore
+            if (!window._amzImageCache) window._amzImageCache = {};
+            // @ts-ignore
+            if (!window._amzVideoCache) window._amzVideoCache = {};
+
+            // @ts-ignore
             const cache = window._amzImageCache as Record<string, string[]>;
+            // @ts-ignore
+            const videoCache = window._amzVideoCache as Record<string, string[]>;
 
             // Filter variants that need fetching:
             // 1. Not currently being fetched (Queue)
@@ -1050,9 +1060,9 @@ export default defineContentScript({
             console.log(`AMZImage: Starting ${fastMode ? 'FAST' : 'deep'} fetch for ${targets.length} variants...`);
 
             // Process in chunks
-            // Fast Mode: 20 parallel requests (Aggressive)
-            // Normal Mode: 6 parallel requests (Polite)
-            const CHUNK_SIZE = fastMode ? 20 : 6;
+            // Fast Mode: 25 parallel requests (Maximize throughput)
+            // Normal Mode: 10 parallel requests (Enhanced speed)
+            const CHUNK_SIZE = fastMode ? 25 : 10;
             for (let i = 0; i < targets.length; i += CHUNK_SIZE) {
                 const chunk = targets.slice(i, i + CHUNK_SIZE);
 
@@ -1137,6 +1147,72 @@ export default defineContentScript({
                             cache[variant.asin] = uniqueImages;
                             // console.log(`AMZImage: Deep fetched ${uniqueImages.length} images for ${variant.asin}`);
                         }
+
+                        // OFFICIAL PRODUCT VIDEO SCRAPING - Use same patterns as main page
+                        try {
+                            const productVideos: string[] = [];
+                            const seenVideoIds = new Set<string>();
+
+                            // Helper to get video ID for deduplication
+                            const getVideoBase = (url: string) => {
+                                try { return new URL(url).pathname; }
+                                catch { return url.split('?')[0]; }
+                            };
+
+                            // Pattern: Global video scanner (same as main page)
+                            const globalVideoMatches = html.match(/https?:\/\/[^"'\s]*?(?:amazon|ssl|media-amazon)[^"'\s]*?\.(mp4|m3u8|webm)[^"'\s]*/gi);
+                            
+                            if (globalVideoMatches) {
+                                globalVideoMatches.forEach(vUrl => {
+                                    const cleanUrl = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '').replace(/"/g, '');
+                                    const urlIndex = html.indexOf(vUrl);
+                                    const vContext = html.substring(
+                                        Math.max(0, urlIndex - 600), 
+                                        Math.min(html.length, urlIndex + 600)
+                                    ).toLowerCase();
+
+                                    // Skip promotional content
+                                    const promoPatterns = ['brand-story', 'similar', 'compare', 'sponsored', 'advertisement', 
+                                                          'related-brand', 'also-viewed', 'bought-together', 'influencer'];
+                                    if (promoPatterns.some(p => vContext.includes(p) || cleanUrl.toLowerCase().includes(p))) {
+                                        return;
+                                    }
+
+                                    // Skip review videos
+                                    const reviewPatterns = ['customer-review', 'customerreview', 'review-video', 
+                                                           'ugc', 'usermedia', 'cr-media', 'crwidget'];
+                                    if (reviewPatterns.some(p => vContext.includes(p) || cleanUrl.toLowerCase().includes(p))) {
+                                        return;
+                                    }
+
+                                    // Check for official product video context
+                                    const officialPatterns = ['product-video', 'product_video', 'main-video', 'gallery-video',
+                                                              'dp-video', 'image-block', 'alt-images', 'color-images', 'vse-video'];
+                                    const isOfficial = officialPatterns.some(p => vContext.includes(p));
+
+                                    // Also accept if URL is from main media CDN without negative context
+                                    const isMainMedia = cleanUrl.includes('m.media-amazon.com') && 
+                                                        !cleanUrl.includes('review') && 
+                                                        !cleanUrl.includes('customer');
+
+                                    if (isOfficial || isMainMedia) {
+                                        const vid = getVideoBase(cleanUrl);
+                                        if (!seenVideoIds.has(vid)) {
+                                            seenVideoIds.add(vid);
+                                            productVideos.push(cleanUrl);
+                                        }
+                                    }
+                                });
+                            }
+
+                            // Store ALL official product videos found
+                            if (productVideos.length > 0) {
+                                videoCache[variant.asin] = productVideos;
+                                console.log(`AMZImage: Found ${productVideos.length} official video(s) for ${variant.asin}`);
+                            }
+                        } catch (e) {
+                            console.warn('AMZImage: Video extraction error', e);
+                        }
                     } catch (e) {
                         // console.warn(`AMZImage: Failed deep fetch for ${variant.asin}`, e);
                     } finally {
@@ -1144,9 +1220,12 @@ export default defineContentScript({
                     }
                 }));
 
-                // Politeness delay: 0ms for Fast Mode, 300ms for Background Mode
+                // Politeness delay: REMOVED for user-requested immediate loading
+                // We rely on browser network scheduling to handle the load.
+                // Mobile/Slow networks might queue, but that's better than artificial delay.
                 if (!fastMode) {
-                    await new Promise(r => setTimeout(r, 300));
+                    // Minimal breathing room only if not fast mode
+                    await new Promise(r => setTimeout(r, 50));
                 }
             }
 
@@ -1234,12 +1313,24 @@ export default defineContentScript({
 
             if (onProductPage) {
                 // scrapeVariants returns VariantItem[] directly
+                // scrapeVariants returns VariantItem[] directly
                 const scrapedVariants = scrapeVariants(isHoveringVariant);
                 variants = scrapedVariants;
 
-                // TRIGGER DEEP FETCH (Background)
-                // This will silently fill the cache and update the UI incrementally
-                deepFetchVariantImages(variants).catch(e => console.error("Deep fetch error:", e));
+                // MERGE CACHED VIDEOS into variants (since scrapeVariants doesn't do it)
+                // @ts-ignore
+                const vCache = (window._amzVideoCache || {}) as Record<string, string[]>;
+                if (Object.keys(vCache).length > 0) {
+                    variants.forEach(v => {
+                        if (vCache[v.asin] && vCache[v.asin].length > 0) {
+                            v.videos = vCache[v.asin];
+                        }
+                    });
+                }
+
+                // TRIGGER DEEP FETCH (Background - Fast Mode FORCE)
+                // This will silently fill the cache and update the UI incrementally but rapidly
+                deepFetchVariantImages(variants, true).catch(e => console.error("Deep fetch error:", e));
 
                 // Reconstruct maps from the variants array
                 variants.forEach(v => {

@@ -3,6 +3,7 @@ export interface VariantItem {
     asin: string;
     image?: string;
     images?: string[];
+    videos?: string[]; // Added videos
     selected: boolean;
     available: boolean;
     isLoading?: boolean;
