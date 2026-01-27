@@ -30,7 +30,18 @@ const root = createRoot(container);
 // Scrape product data from content script
 const scrapeData = async (triggerScroll: boolean = false) => {
     try {
-        const [tab] = await browser.tabs.query({ active: true, lastFocusedWindow: true });
+        // Robust tab finding
+        let tabs = await browser.tabs.query({ active: true, currentWindow: true });
+        if (tabs.length === 0 || !tabs[0].id) {
+            tabs = await browser.tabs.query({ active: true, lastFocusedWindow: true });
+        }
+
+        let tab = tabs.find(t => t.url && (t.url.includes('.amazon.') || t.url.includes('/dp/')));
+        if (!tab) {
+            const amazonTabs = await browser.tabs.query({ url: "*://*.amazon.*/*" });
+            tab = amazonTabs.find(t => t.active) || amazonTabs[0];
+        }
+
         if (!tab?.id) throw new Error('No active tab');
 
         const response = await browser.tabs.sendMessage(tab.id, {
@@ -91,7 +102,18 @@ const downloadZip = async (items: (string | { url: string; filename: string })[]
 // Show preview on the Amazon page (integrated preview overlay)
 const showPreview = async (url: string, mediaType: 'image' | 'video', allUrls: string[]) => {
     try {
-        const [tab] = await browser.tabs.query({ active: true, lastFocusedWindow: true });
+        // Robust tab finding
+        let tabs = await browser.tabs.query({ active: true, currentWindow: true });
+        if (tabs.length === 0 || !tabs[0].id) {
+            tabs = await browser.tabs.query({ active: true, lastFocusedWindow: true });
+        }
+
+        let tab = tabs.find(t => t.url && (t.url.includes('.amazon.') || t.url.includes('/dp/')));
+        if (!tab) {
+            const amazonTabs = await browser.tabs.query({ url: "*://*.amazon.*/*" });
+            tab = amazonTabs.find(t => t.active) || amazonTabs[0];
+        }
+
         if (!tab?.id) throw new Error('No active tab');
 
         await browser.tabs.sendMessage(tab.id, {
@@ -108,10 +130,28 @@ const showPreview = async (url: string, mediaType: 'image' | 'video', allUrls: s
 // Select a variant on the Amazon page
 const selectVariant = async (asin: string) => {
     try {
-        const [tab] = await browser.tabs.query({ active: true, lastFocusedWindow: true });
-        if (!tab?.id) throw new Error('No active tab');
+        // Robust tab finding:
+        // 1. Try active tab in current window (standard)
+        // 2. Try active tab in ANY window (last focused)
+        // 3. Fallback: Find ANY Amazon tab
+        let tabs = await browser.tabs.query({ active: true, currentWindow: true });
 
-        const response = await browser.tabs.sendMessage(tab.id, {
+        if (tabs.length === 0 || !tabs[0].id) {
+            tabs = await browser.tabs.query({ active: true, lastFocusedWindow: true });
+        }
+
+        // Filter for Amazon tabs if we have multiple or unsure
+        let targetTab = tabs.find(t => t.url && (t.url.includes('.amazon.') || t.url.includes('/dp/')));
+
+        // Final fallback: just get ANY amazon tab
+        if (!targetTab) {
+            const amazonTabs = await browser.tabs.query({ url: "*://*.amazon.*/*" });
+            targetTab = amazonTabs.find(t => t.active) || amazonTabs[0];
+        }
+
+        if (!targetTab?.id) throw new Error('No active Amazon tab found');
+
+        const response = await browser.tabs.sendMessage(targetTab.id, {
             type: 'SELECT_VARIANT',
             asin
         });

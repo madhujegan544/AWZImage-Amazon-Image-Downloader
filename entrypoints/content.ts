@@ -1274,6 +1274,12 @@ export default defineContentScript({
                 const seenImageBases = new Set<string>();
                 const seenReviewBases = new Set<string>();
 
+                // Initialize seen set with already prefetched images
+                reviewImages.forEach(img => {
+                    const b = getImageBase(img);
+                    if (b) seenReviewBases.add(b);
+                });
+
                 function addUniqueReviewImage(url: string, contextContent: string = ''): boolean {
                     if (!url || !isValidImage(url)) return false;
 
@@ -2174,28 +2180,38 @@ export default defineContentScript({
                 // runs ONCE per ASIN change, regardless of triggerScroll
                 if (onProductPage && asin && asin !== lastFetchedReviewAsin) {
                     lastFetchedReviewAsin = asin;
-                    const extra = await fetchAllReviewMedia(asin, 100);
-                    let hasNewMedia = false;
-                    if (extra.images.length > 0) {
-                        extra.images.forEach(img => {
-                            const hi = toHighRes(img);
-                            const b = getImageBase(hi);
-                            if (!seenReviewBases.has(b)) {
-                                seenReviewBases.add(b);
-                                reviewImages.push(hi);
+
+                    // Run in background - DO NOT AWAIT
+                    fetchAllReviewMedia(asin, 100).then(extra => {
+                        let hasNewMedia = false;
+                        if (extra.images.length > 0) {
+                            extra.images.forEach(img => {
+                                const hi = toHighRes(img);
+                                const b = getImageBase(hi);
+                                if (!seenReviewBases.has(b)) {
+                                    seenReviewBases.add(b);
+                                    // Update global store so next scrape picks it up
+                                    prefetchedReviewImages.push(hi);
+                                    hasNewMedia = true;
+                                }
+                            });
+                        }
+                        if (extra.videos.length > 0) {
+                            const newVideos = extra.videos.filter(v => !prefetchedReviewVideos.includes(v));
+                            if (newVideos.length > 0) {
+                                prefetchedReviewVideos.push(...newVideos);
                                 hasNewMedia = true;
                             }
-                        });
-                    }
-                    if (extra.videos.length > 0) {
-                        reviewVideos.push(...extra.videos);
-                        hasNewMedia = true;
-                    }
+                        }
 
-                    // Notify panel that new review media was loaded
-                    if (hasNewMedia) {
-                        notifyContentChange('review_media_loaded');
-                    }
+                        // Notify panel that new review media was loaded
+                        if (hasNewMedia) {
+                            console.log('AMZImage: Background review fetch complete, notifying UI');
+                            notifyContentChange('review_media_loaded');
+                        }
+                    }).catch(e => {
+                        console.warn('AMZImage: Background review fetch failed', e);
+                    });
                 }
 
                 // Capture from any open modals or gallery state JSON

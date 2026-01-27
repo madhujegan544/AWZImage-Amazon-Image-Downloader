@@ -334,10 +334,33 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     const [selectingVariant, setSelectingVariant] = useState(false);
     const [variantStartIndex, setVariantStartIndex] = useState(0);
     const [selectedVariantAsin, setSelectedVariantAsin] = useState<string | null>(null);
+    // Per-ASIN cache for variant images - preserves correct images for ALL variants across selections
+    const [variantImagesCache, setVariantImagesCache] = useState<Record<string, string[]>>({});
+    // Review section is collapsed by default - moved away from top per user request
+    const [reviewSectionExpanded, setReviewSectionExpanded] = useState(false);
+    // Separate sub-tab state for the review section (images/videos)
+    const [reviewSubTab, setReviewSubTab] = useState<'images' | 'videos'>('images');
 
     // Derived state
     // Use selectedVariantAsin to override default selection logic
-    const allMediaItems = useMemo(() => getMediaItems(productData, selectedVariantAsin), [productData, selectedVariantAsin]);
+    // When variantImagesCache has images for the selected variant, prioritize it over freshly scraped data
+    const allMediaItems = useMemo(() => {
+        const cachedImages = selectedVariantAsin ? variantImagesCache[selectedVariantAsin] : null;
+        // If we have cached images for the selected variant, use a modified data object
+        if (selectedVariantAsin && cachedImages && cachedImages.length > 0 && productData) {
+            // Create a modified version of productData with the cached images
+            const modifiedData = {
+                ...productData,
+                variants: productData.variants?.map(v =>
+                    v.asin === selectedVariantAsin
+                        ? { ...v, images: cachedImages, selected: true }
+                        : { ...v, selected: false }
+                )
+            };
+            return getMediaItems(modifiedData, selectedVariantAsin);
+        }
+        return getMediaItems(productData, selectedVariantAsin);
+    }, [productData, selectedVariantAsin, variantImagesCache]);
     const isProductPage = productData?.pageType === 'product';
     const isListingPage = productData?.pageType === 'listing';
 
@@ -482,6 +505,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                         setIsSelectionMode(false);
                         setShowAllItems(false);
                         setSelectedVariantAsin(null);
+                        setVariantImagesCache({}); // Clear cached images for new product
 
                         // Brief delay to show loading state
                         setTimeout(() => {
@@ -549,10 +573,31 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     // ============================================
     // Variant Selection
     // ============================================
-    const handleVariantSelect = async (asin: string, variantName: string) => {
+    const handleVariantSelect = async (asin: string, variantName: string, variantImages?: string[]) => {
         if (!selectVariant || selectingVariant) return;
 
         setSelectedVariantAsin(asin); // Set for immediate persistent highlighting
+
+        // IMMEDIATELY cache the images passed from the caller (variant card)
+        // This is the most reliable source as it's what the card is displaying
+        // Use functional update to preserve other variants' cached images
+        if (variantImages && variantImages.length > 0) {
+            console.log('[Pixora] Caching', variantImages.length, 'images for variant', asin, 'from card');
+            setVariantImagesCache(prev => ({ ...prev, [asin]: [...variantImages] }));
+        } else {
+            // Fallback: try to find from current productData
+            const currentVariant = productData?.variants?.find(v => v.asin === asin);
+            if (currentVariant?.images && currentVariant.images.length > 0) {
+                console.log('[Pixora] Caching', currentVariant.images.length, 'images for variant', asin, 'from productData.variants');
+                setVariantImagesCache(prev => ({ ...prev, [asin]: [...currentVariant.images!] }));
+            } else if (productData?.variantImagesByAsin?.[asin]) {
+                console.log('[Pixora] Caching', productData.variantImagesByAsin[asin].length, 'images for variant', asin, 'from variantImagesByAsin');
+                setVariantImagesCache(prev => ({ ...prev, [asin]: [...productData.variantImagesByAsin![asin]] }));
+            } else {
+                console.log('[Pixora] WARNING: No images to cache for variant', asin);
+            }
+        }
+
         setSelectingVariant(true);
         setVariantDropdownOpen(false);
 
@@ -572,10 +617,47 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     try {
                         const newData = await scrapeProductData(false); // Poll WITHOUT triggering scroll
                         if (newData) {
-                            // Check if variant actually changed
-                            const newVariant = newData.variants?.find(v => v.selected);
-                            if (newVariant?.asin === asin || attempts >= maxAttempts) {
-                                setProductData(enrichProductData(newData));
+                            const enrichedData = enrichProductData(newData);
+                            // Check if variant actually changed to the one we selected
+                            const newVariant = enrichedData?.variants?.find(v => v.selected);
+
+                            if (newVariant?.asin === asin) {
+                                // SUCCESS: Amazon page updated
+
+                                // FIX: Enforce the images we cached from the click event into the new productData.
+                                // This prevents "previous images" (e.g. Pink) from overwriting the correct images (e.g. Blue)
+                                // on the variant card if the DOM scraper sync was imperfect or lagged.
+                                let imgsToEnforce = variantImages;
+                                if (!imgsToEnforce || imgsToEnforce.length === 0) {
+                                    // If we didn't have direct images, try to salvage from the cache we just set
+                                    // Note: we can't easily access the functional state update result here, 
+                                    // so we rely on what we *tried* to cache at the start of the function.
+                                    const currentVariant = productData?.variants?.find(v => v.asin === asin);
+                                    if (currentVariant?.images && currentVariant.images.length > 0) imgsToEnforce = currentVariant.images;
+                                    else if (productData?.variantImagesByAsin?.[asin]) imgsToEnforce = productData.variantImagesByAsin[asin];
+                                }
+
+                                if (enrichedData && imgsToEnforce && imgsToEnforce.length > 0) {
+                                    console.log('[Pixora] Enforcing verified images in productData for', asin);
+                                    if (enrichedData.variants) {
+                                        enrichedData.variants = enrichedData.variants.map(v =>
+                                            v.asin === asin
+                                                ? { ...v, images: imgsToEnforce!, image: imgsToEnforce![0] || v.image }
+                                                : v
+                                        );
+                                    }
+                                    // Also sync the map
+                                    if (!enrichedData.variantImagesByAsin) enrichedData.variantImagesByAsin = {};
+                                    enrichedData.variantImagesByAsin[asin] = imgsToEnforce;
+                                }
+
+                                setProductData(enrichedData);
+                                setSelectingVariant(false);
+                                return;
+                            } else if (attempts >= maxAttempts) {
+                                // Max attempts reached, keep using cached images
+                                // Don't update productData to avoid showing wrong variant's images
+                                console.log('Max polling attempts reached, keeping cached images for', asin);
                                 setSelectingVariant(false);
                                 return;
                             }
@@ -587,8 +669,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     if (attempts < maxAttempts) {
                         await pollData();
                     } else {
-                        // Final attempt
-                        loadData();
+                        // Final attempt - keep cached images
                         setSelectingVariant(false);
                     }
                 };
@@ -833,6 +914,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
         // Reset variant state completely
         setSelectedVariantAsin(null);
+        setCachedVariantImages(null); // Clear cached images on refresh
         setVariantDropdownOpen(false);
         setSelectingVariant(false);
         setVariantStartIndex(0);
@@ -1057,7 +1139,20 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     // Variant List (Grouped Cards)
     const renderVariantList = () => {
         // Show ALL variants (including unavailable ones for browsing)
-        const allVariants = productData?.variants || [];
+        // FIX: Apply cached images to ALL variants that have been verified, not just the selected one
+        const baseVariants = productData?.variants || [];
+        const allVariants = baseVariants.map(v => {
+            const cachedImages = variantImagesCache[v.asin];
+            if (cachedImages && cachedImages.length > 0) {
+                // Override images with our trusted cache for this variant
+                return {
+                    ...v,
+                    images: cachedImages,
+                    image: cachedImages[0] || v.image
+                };
+            }
+            return v;
+        });
         if (allVariants.length === 0) return null;
 
         return (
@@ -1069,26 +1164,26 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     justifyContent: 'space-between',
                     marginBottom: '10px',
                     position: 'sticky',
-                    top: '-14px',
+                    top: '-12px',
                     zIndex: 20,
                     // Glassmorphism Header
-                    background: 'rgba(248, 250, 252, 0.85)',
+                    background: 'rgba(248, 250, 252, 0.95)',
                     backdropFilter: 'blur(12px)',
                     WebkitBackdropFilter: 'blur(12px)', // Safari support
-                    padding: '8px 0',
-                    margin: '0 -14px 10px -14px',
-                    paddingLeft: '14px',
-                    paddingRight: '14px',
+                    padding: '10px 0',
+                    margin: '-12px -12px 10px -12px',
+                    paddingLeft: '12px',
+                    paddingRight: '12px',
                     borderBottom: `1px solid ${COLORS.border}`
                 }}>
                     <span style={{
-                        fontSize: '11px',
+                        fontSize: '12px',
                         fontWeight: 700,
-                        color: COLORS.textMuted,
+                        color: COLORS.textSecondary,
                         textTransform: 'uppercase',
                         letterSpacing: '0.5px'
                     }}>
-                        Product Variants ({allVariants.length})
+                        PRODUCT VARIANTS ({allVariants.length})
                     </span>
                 </div>
 
@@ -1096,7 +1191,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 <div style={{
                     display: 'grid',
                     gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
-                    gap: '12px'
+                    gap: '10px'
                 }}>
                     {allVariants.map((variant, index) => {
                         const isCurrent = selectedVariantAsin ? variant.asin === selectedVariantAsin : variant.selected;
@@ -1110,6 +1205,10 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
                         // Use pre-enriched images from the variant data
                         const displayImages = variant.images || [];
+                        // Effective images for caching - includes thumbnail as fallback
+                        const effectiveImages = displayImages.length > 0
+                            ? displayImages
+                            : (thumbnail ? [thumbnail] : []);
                         const imageCount = displayImages.length;
 
                         // GUARANTEE 2 preview images: duplicate if only 1 exists
@@ -1130,7 +1229,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 onClick={() => {
                                     // Allow clicking ALL variants (including unavailable) to view/download media
                                     if (!isCurrent && !selectingVariant) {
-                                        handleVariantSelect(variant.asin, variant.name);
+                                        handleVariantSelect(variant.asin, variant.name, effectiveImages);
                                     }
                                 }}
                                 style={{
@@ -1297,7 +1396,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                             }}
                                             onMouseEnter={async () => {
                                                 if (!isCurrent && !selectingVariant && !isUnavailable) {
-                                                    handleVariantSelect(variant.asin, variant.name);
+                                                    handleVariantSelect(variant.asin, variant.name, effectiveImages);
                                                 }
                                             }}
                                             disabled={selectingVariant}
@@ -1744,7 +1843,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
             {/* SEARCH BAR (Listing Pages) */}
             {!loading && isListingPage && (
-                <div style={{ padding: '10px 14px', background: COLORS.surface, borderBottom: `1px solid ${COLORS.borderLight}` }}>
+                <div style={{ padding: '10px 12px', background: COLORS.surface, borderBottom: `1px solid ${COLORS.borderLight}` }}>
                     <div style={{ position: 'relative' }}>
                         <div style={{
                             position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)',
@@ -1790,124 +1889,127 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 </div>
             )}
 
-            {/* HEADER ACTION BAR - Product Page (Compact & Powerful) */}
+            {/* HEADER ACTION BAR - Product Page (Product Media Section) */}
             {!loading && hasContent && isProductPage && (
                 <div style={{
-                    padding: '12px 14px',
+                    padding: '12px 16px',
                     background: COLORS.surface,
                     borderBottom: `1px solid ${COLORS.borderLight}`,
                     display: 'flex',
-                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
                     gap: '12px',
                     flexShrink: 0,
-                    zIndex: 30
+                    zIndex: 30,
+                    boxShadow: '0 2px 4px rgba(0,0,0,0.02)'
                 }}>
-                    {/* Top Row: Navigation + Download */}
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
-                        {/* Compact Tabs (Segmented Control) */}
+                    {/* Left: Title Section */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 'fit-content' }}>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={COLORS.primary} strokeWidth="2.5">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                            <circle cx="8.5" cy="8.5" r="1.5" />
+                            <polyline points="21 15 16 10 5 21" />
+                        </svg>
+                        <span style={{
+                            fontSize: '14px',
+                            fontWeight: 700,
+                            color: COLORS.text,
+                            letterSpacing: '-0.2px',
+                            whiteSpace: 'nowrap'
+                        }}>
+                            Product Media
+                        </span>
+                    </div>
+
+                    {/* Right: Controls (Filters + Action) */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        {/* Filter Pills (Small) */}
                         <div style={{
                             display: 'flex',
+                            gap: '4px',
                             background: COLORS.background,
-                            padding: '4px',
+                            padding: '3px',
                             borderRadius: '8px',
-                            flex: 1
                         }}>
                             <button
-                                onClick={() => setMainTab('product')}
+                                onClick={() => setSubTab('images')}
                                 style={{
-                                    flex: 1, padding: '6px 12px',
-                                    borderRadius: '6px',
-                                    fontSize: '13px', fontWeight: 600,
-                                    background: mainTab === 'product' ? COLORS.surface : 'transparent',
-                                    color: mainTab === 'product' ? COLORS.text : COLORS.textSecondary,
-                                    boxShadow: mainTab === 'product' ? COLORS.shadowSm : 'none',
+                                    display: 'flex', alignItems: 'center', gap: '4px',
+                                    padding: '4px 8px', borderRadius: '6px',
+                                    border: 'none',
+                                    background: subTab === 'images' ? COLORS.surface : 'transparent',
+                                    color: subTab === 'images' ? COLORS.primary : COLORS.textSecondary,
+                                    fontSize: '11px', fontWeight: 600,
+                                    cursor: 'pointer',
+                                    boxShadow: subTab === 'images' ? COLORS.shadowSm : 'none',
                                     transition: 'all 0.2s ease'
                                 }}
+                                title="Images"
                             >
-                                Product
+                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                                    <circle cx="8.5" cy="8.5" r="1.5" />
+                                    <polyline points="21 15 16 10 5 21" />
+                                </svg>
+                                {categoryCounts['productImages']}
                             </button>
                             <button
-                                onClick={() => setMainTab('review')}
+                                onClick={() => setSubTab('videos')}
                                 style={{
-                                    flex: 1, padding: '6px 12px',
-                                    borderRadius: '6px',
-                                    fontSize: '13px', fontWeight: 600,
-                                    background: mainTab === 'review' ? COLORS.surface : 'transparent',
-                                    color: mainTab === 'review' ? COLORS.text : COLORS.textSecondary,
-                                    boxShadow: mainTab === 'review' ? COLORS.shadowSm : 'none',
+                                    display: 'flex', alignItems: 'center', gap: '4px',
+                                    padding: '4px 8px', borderRadius: '6px',
+                                    border: 'none',
+                                    background: subTab === 'videos' ? COLORS.surface : 'transparent',
+                                    color: subTab === 'videos' ? COLORS.primary : COLORS.textSecondary,
+                                    fontSize: '11px', fontWeight: 600,
+                                    cursor: 'pointer',
+                                    boxShadow: subTab === 'videos' ? COLORS.shadowSm : 'none',
                                     transition: 'all 0.2s ease'
                                 }}
+                                title="Videos"
                             >
-                                Reviews
+                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                    <polygon points="5 3 19 12 5 21 5 3" />
+                                </svg>
+                                {categoryCounts['productVideos']}
                             </button>
                         </div>
 
-                        {/* ACTION: Download All (Top Right) */}
+                        {/* Download Action - Icon Only for compactness or Small Text? User said 'same space'. Icon button is safer for space. */}
+                        {/* Let's keep Text but smaller padding if space is tight. OR Icon only. */}
+                        {/* Screenshot showed broad width. I will try Compact Text Button. */}
                         <button
                             onClick={downloadAll}
                             disabled={downloading}
-                            className="download-compact-btn"
                             style={{
-                                padding: '8px 16px',
-                                background: COLORS.primary,
+                                padding: '5px 10px',
+                                background: downloading ? COLORS.textMuted : COLORS.primary,
                                 border: 'none',
                                 borderRadius: '8px',
-                                fontSize: '13px',
-                                fontWeight: 700,
+                                fontSize: '11px',
+                                fontWeight: 600,
                                 color: '#fff',
                                 display: 'flex',
                                 alignItems: 'center',
                                 gap: '6px',
-                                boxShadow: COLORS.shadowPrimary,
+                                flexShrink: 0,
                                 cursor: downloading ? 'not-allowed' : 'pointer',
-                                height: '36px', // Match header height
-                                whiteSpace: 'nowrap'
+                                transition: 'all 0.2s ease',
+                                boxShadow: downloading ? 'none' : '0 1px 3px rgba(0,0,0,0.1)'
                             }}
                         >
                             {downloading ? (
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: 'spin 1s linear infinite' }}>
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: 'spin 1s linear infinite' }}>
                                     <path d="M23 4v6h-6M1 20v-6h6" />
                                 </svg>
                             ) : (
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                                     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                                     <polyline points="7 10 12 15 17 10" />
                                     <line x1="12" y1="15" x2="12" y2="3" />
                                 </svg>
                             )}
-                            {downloading ? 'WAIT...' : 'DOWNLOAD'}
-                        </button>
-                    </div>
-
-                    {/* Second Row: Sub-Filters (Images/Videos) - Only visual toggles now */}
-                    <div style={{ display: 'flex', gap: '10px' }}>
-                        <button
-                            onClick={() => setSubTab('images')}
-                            style={{
-                                display: 'flex', alignItems: 'center', gap: '6px',
-                                padding: '4px 8px', borderRadius: '100px',
-                                border: `1px solid ${subTab === 'images' ? COLORS.primary : COLORS.border}`,
-                                background: subTab === 'images' ? COLORS.primarySoft : 'transparent',
-                                color: subTab === 'images' ? COLORS.primary : COLORS.textSecondary,
-                                fontSize: '11px', fontWeight: 600
-                            }}
-                        >
-                            <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: subTab === 'images' ? COLORS.primary : COLORS.border }} />
-                            Images ({categoryCounts[mainTab === 'product' ? 'productImages' : 'reviewImages']})
-                        </button>
-                        <button
-                            onClick={() => setSubTab('videos')}
-                            style={{
-                                display: 'flex', alignItems: 'center', gap: '6px',
-                                padding: '4px 8px', borderRadius: '100px',
-                                border: `1px solid ${subTab === 'videos' ? COLORS.primary : COLORS.border}`,
-                                background: subTab === 'videos' ? COLORS.primarySoft : 'transparent',
-                                color: subTab === 'videos' ? COLORS.primary : COLORS.textSecondary,
-                                fontSize: '11px', fontWeight: 600
-                            }}
-                        >
-                            <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: subTab === 'videos' ? COLORS.primary : COLORS.border }} />
-                            Videos ({categoryCounts[mainTab === 'product' ? 'productVideos' : 'reviewVideos']})
+                            {downloading ? 'Wait' : 'Download'}
                         </button>
                     </div>
                 </div>
@@ -1970,14 +2072,14 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                         {/* MEDIA GRID SECTION */}
                         {isProductPage && (
                             <div style={{
-                                padding: '14px',
+                                padding: '12px',
                                 borderBottom: `1px solid ${COLORS.borderLight}`,
                                 background: COLORS.surface,
                                 // When expanded, allow shrinking to fit and handle scrolling
                                 flexShrink: showAllItems ? 1 : 0,
                                 overflowY: 'auto',
                                 // Max height of ~3 rows when expanded to keep variant list visible
-                                maxHeight: showAllItems ? '350px' : 'none',
+                                maxHeight: showAllItems ? '340px' : 'none',
                                 transition: 'all 0.3s ease-in-out',
                                 position: 'relative'
                             }}>
@@ -1990,7 +2092,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                     <div style={{
                                         display: 'grid',
                                         gridTemplateColumns: 'repeat(3, 1fr)',
-                                        gap: '8px'
+                                        gap: '10px'
                                     }}>
                                         {filteredMediaItems.slice(0, showAllItems ? undefined : INITIAL_ITEMS_COUNT).map((item, index) => renderMediaItem(item, index))}
                                     </div>
@@ -2073,14 +2175,202 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             </div>
                         )}
 
+                        {/* COLLAPSIBLE REVIEW MEDIA SECTION - Between Product Images and Variants */}
+                        {isProductPage && mainTab === 'product' && (categoryCounts.reviewImages > 0 || categoryCounts.reviewVideos > 0) && (
+                            <div style={{
+                                width: '100%',
+                                background: COLORS.surface,
+                                borderBottom: `1px solid ${COLORS.borderLight}`,
+                                flexShrink: 0
+                            }}>
+                                {/* Review Section Header (Collapsible) */}
+                                <div style={{
+                                    borderTop: `1px solid ${COLORS.borderLight}`,
+                                    background: reviewSectionExpanded ? COLORS.background : COLORS.surface,
+                                    transition: 'all 0.2s ease',
+                                }}>
+                                    <div
+                                        onClick={() => setReviewSectionExpanded(!reviewSectionExpanded)}
+                                        style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'space-between',
+                                            padding: '12px 16px',
+                                            cursor: 'pointer',
+                                            userSelect: 'none'
+                                        }}
+                                    >
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={COLORS.primary} strokeWidth="2.5">
+                                                <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+                                            </svg>
+                                            <span style={{
+                                                fontSize: '14px',
+                                                fontWeight: 700,
+                                                color: COLORS.text,
+                                                letterSpacing: '-0.2px'
+                                            }}>
+                                                Review Media
+                                                <span style={{
+                                                    marginLeft: '8px',
+                                                    fontSize: '11px',
+                                                    color: COLORS.textSecondary,
+                                                    fontWeight: 500,
+                                                    background: COLORS.background,
+                                                    padding: '2px 8px',
+                                                    borderRadius: '10px',
+                                                    border: `1px solid ${COLORS.border}`
+                                                }}>
+                                                    {categoryCounts.reviewImages + categoryCounts.reviewVideos}
+                                                </span>
+                                            </span>
+                                        </div>
+
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                            {/* Download Button (Only visible if expanded or always? Let's keep it clean, distinct from chevron) */}
+                                            <button
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    const reviewItems = allMediaItems.filter(item => item.source === 'review').map(item => item.url);
+                                                    if (reviewItems.length > 0) {
+                                                        const filename = `pixora-${productData?.asin || 'item'}-reviews-${Date.now()}`;
+                                                        downloadZip(reviewItems, filename);
+                                                    }
+                                                }}
+                                                className="download-btn-hover"
+                                                style={{
+                                                    padding: '6px 12px',
+                                                    background: 'transparent',
+                                                    border: `1px solid ${COLORS.primary}`,
+                                                    borderRadius: '8px',
+                                                    fontSize: '11px',
+                                                    fontWeight: 600,
+                                                    color: COLORS.primary,
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    gap: '6px',
+                                                    cursor: 'pointer',
+                                                    transition: 'all 0.2s ease'
+                                                }}
+                                                onMouseEnter={(e) => {
+                                                    e.currentTarget.style.background = COLORS.primarySoft;
+                                                }}
+                                                onMouseLeave={(e) => {
+                                                    e.currentTarget.style.background = 'transparent';
+                                                }}
+                                            >
+                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                                    <polyline points="7 10 12 15 17 10" />
+                                                    <line x1="12" y1="15" x2="12" y2="3" />
+                                                </svg>
+                                                Download
+                                            </button>
+
+                                            <svg
+                                                width="16" height="16" viewBox="0 0 24 24" fill="none"
+                                                stroke={COLORS.textMuted} strokeWidth="2"
+                                                style={{
+                                                    transform: reviewSectionExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
+                                                    transition: 'transform 0.2s ease'
+                                                }}
+                                            >
+                                                <polyline points="6 9 12 15 18 9" />
+                                            </svg>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Review Section Content */}
+                                {reviewSectionExpanded && (
+                                    <div style={{
+                                        padding: '12px 16px',
+                                        background: COLORS.background,
+                                        borderRadius: '0'
+                                    }}>
+                                        {/* Review Sub-Tabs */}
+                                        <div style={{
+                                            marginBottom: '14px',
+                                        }}>
+                                            {/* Left: Filter Pills */}
+                                            <div style={{
+                                                display: 'flex',
+                                                gap: '4px',
+                                                background: COLORS.background,
+                                                padding: '3px',
+                                                borderRadius: '8px',
+                                                width: 'fit-content'
+                                            }}>
+                                                <button
+                                                    onClick={() => setReviewSubTab('images')}
+                                                    style={{
+                                                        display: 'flex', alignItems: 'center', gap: '4px',
+                                                        padding: '4px 8px', borderRadius: '6px',
+                                                        border: 'none',
+                                                        background: reviewSubTab === 'images' ? COLORS.primarySoft : 'transparent',
+                                                        color: reviewSubTab === 'images' ? COLORS.primary : COLORS.textSecondary,
+                                                        fontSize: '11px', fontWeight: 600,
+                                                        cursor: categoryCounts.reviewImages === 0 ? 'not-allowed' : 'pointer',
+                                                        opacity: categoryCounts.reviewImages === 0 ? 0.5 : 1,
+                                                        boxShadow: 'none',
+                                                        transition: 'all 0.2s ease'
+                                                    }}
+                                                    disabled={categoryCounts.reviewImages === 0}
+                                                >
+                                                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                                                        <circle cx="8.5" cy="8.5" r="1.5" />
+                                                        <polyline points="21 15 16 10 5 21" />
+                                                    </svg>
+                                                    {categoryCounts.reviewImages}
+                                                </button>
+                                                <button
+                                                    onClick={() => setReviewSubTab('videos')}
+                                                    style={{
+                                                        display: 'flex', alignItems: 'center', gap: '4px',
+                                                        padding: '4px 8px', borderRadius: '6px',
+                                                        border: 'none',
+                                                        background: reviewSubTab === 'videos' ? COLORS.primarySoft : 'transparent',
+                                                        color: reviewSubTab === 'videos' ? COLORS.primary : COLORS.textSecondary,
+                                                        fontSize: '11px', fontWeight: 600,
+                                                        cursor: categoryCounts.reviewVideos === 0 ? 'not-allowed' : 'pointer',
+                                                        opacity: categoryCounts.reviewVideos === 0 ? 0.5 : 1,
+                                                        boxShadow: 'none',
+                                                        transition: 'all 0.2s ease'
+                                                    }}
+                                                    disabled={categoryCounts.reviewVideos === 0}
+                                                >
+                                                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                                        <polygon points="5 3 19 12 5 21 5 3" />
+                                                    </svg>
+                                                    {categoryCounts.reviewVideos}
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        {/* Review Media Grid */}
+                                        <div style={{
+                                            display: 'grid',
+                                            gridTemplateColumns: 'repeat(3, 1fr)',
+                                            gap: '10px'
+                                        }}>
+                                            {allMediaItems
+                                                .filter(item => item.source === 'review' && item.type === (reviewSubTab === 'images' ? 'image' : 'video'))
+                                                .slice(0, 9)
+                                                .map((item, index) => renderMediaItem(item, index))}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
                         {/* SCROLLABLE VARIANTS SECTION - Only for Product Images */}
                         {isProductPage && mainTab === 'product' && subTab === 'images' && allVariants.length > 0 && (
                             <>
                                 {/* Visual separator */}
                                 <div style={{
-                                    height: '8px',
+                                    height: '6px',
                                     background: `linear-gradient(to bottom, ${COLORS.surface}, ${COLORS.background})`,
-                                    borderTop: `1px solid ${COLORS.borderLight}`,
                                     flexShrink: 0
                                 }} />
                                 <div
@@ -2088,7 +2378,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                     style={{
                                         flex: 1,
                                         overflowY: 'auto',
-                                        padding: '14px',
+                                        padding: '12px',
                                         background: COLORS.background
                                     }}
                                 >
@@ -2099,7 +2389,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
                         {/* Listing Grid */}
                         {isListingPage && (
-                            <div style={{ flex: 1, overflowY: 'auto', padding: '14px' }}>
+                            <div style={{ flex: 1, overflowY: 'auto', padding: '12px' }}>
                                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px' }}>
                                     {filteredListingProducts.map((product, index) => renderListingProduct(product, index))}
                                 </div>
