@@ -63,6 +63,11 @@ export default defineContentScript({
                         console.log('AMZImage: Navigation detected', { from: lastAsin, to: currentAsin });
                         lastAsin = currentAsin;
                         lastMainImageSrc = ''; // Reset so we detect new images
+
+                        // Clear video cache to prevent stale videos from previous product
+                        // @ts-ignore
+                        if (window._amzVideoCache) window._amzVideoCache = {};
+
                         notifyContentChange('product_changed');
                     }
                 }
@@ -1148,7 +1153,7 @@ export default defineContentScript({
                             // console.log(`AMZImage: Deep fetched ${uniqueImages.length} images for ${variant.asin}`);
                         }
 
-                        // OFFICIAL PRODUCT VIDEO SCRAPING - Use same patterns as main page
+                        // OFFICIAL PRODUCT VIDEO SCRAPING - STRICT variant-specific only
                         try {
                             const productVideos: string[] = [];
                             const seenVideoIds = new Set<string>();
@@ -1159,53 +1164,74 @@ export default defineContentScript({
                                 catch { return url.split('?')[0]; }
                             };
 
-                            // Pattern: Global video scanner (same as main page)
-                            const globalVideoMatches = html.match(/https?:\/\/[^"'\s]*?(?:amazon|ssl|media-amazon)[^"'\s]*?\.(mp4|m3u8|webm)[^"'\s]*/gi);
-                            
-                            if (globalVideoMatches) {
-                                globalVideoMatches.forEach(vUrl => {
-                                    const cleanUrl = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '').replace(/"/g, '');
-                                    const urlIndex = html.indexOf(vUrl);
-                                    const vContext = html.substring(
-                                        Math.max(0, urlIndex - 600), 
-                                        Math.min(html.length, urlIndex + 600)
-                                    ).toLowerCase();
+                            // STRATEGY 1: Look for videos in the ImageBlockATF / gallery context (most reliable)
+                            const galleryScriptMatch = html.match(/<script[^>]*>[\s\S]*?(?:ImageBlockATF|altImages|colorImages)[\s\S]*?<\/script>/gi);
+                            if (galleryScriptMatch) {
+                                galleryScriptMatch.forEach(scriptBlock => {
+                                    const videoMatches = scriptBlock.match(/https?:\/\/[^"'\s]*?\.(mp4|m3u8|webm)[^"'\s]*/gi);
+                                    if (videoMatches) {
+                                        videoMatches.forEach(vUrl => {
+                                            const cleanUrl = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '').replace(/"/g, '');
+                                            const lowerUrl = cleanUrl.toLowerCase();
 
-                                    // Skip promotional content
-                                    const promoPatterns = ['brand-story', 'similar', 'compare', 'sponsored', 'advertisement', 
-                                                          'related-brand', 'also-viewed', 'bought-together', 'influencer'];
-                                    if (promoPatterns.some(p => vContext.includes(p) || cleanUrl.toLowerCase().includes(p))) {
-                                        return;
-                                    }
+                                            // STRICT EXCLUSIONS - Skip non-product videos
+                                            const excludePatterns = [
+                                                'brand-story', 'brand_story', 'brandstory', 'aplus', 'a-plus', 'a_plus',
+                                                'customer-review', 'customerreview', 'review-video', 'reviewvideo',
+                                                'ugc', 'usermedia', 'user-media', 'cr-media', 'crmedia', 'crwidget',
+                                                'sponsored', 'advertisement', 'promo', 'similar', 'compare', 'related',
+                                                'influencer', 'third-party', 'thirdparty', 'external'
+                                            ];
+                                            if (excludePatterns.some(p => lowerUrl.includes(p))) {
+                                                return;
+                                            }
 
-                                    // Skip review videos
-                                    const reviewPatterns = ['customer-review', 'customerreview', 'review-video', 
-                                                           'ugc', 'usermedia', 'cr-media', 'crwidget'];
-                                    if (reviewPatterns.some(p => vContext.includes(p) || cleanUrl.toLowerCase().includes(p))) {
-                                        return;
-                                    }
-
-                                    // Check for official product video context
-                                    const officialPatterns = ['product-video', 'product_video', 'main-video', 'gallery-video',
-                                                              'dp-video', 'image-block', 'alt-images', 'color-images', 'vse-video'];
-                                    const isOfficial = officialPatterns.some(p => vContext.includes(p));
-
-                                    // Also accept if URL is from main media CDN without negative context
-                                    const isMainMedia = cleanUrl.includes('m.media-amazon.com') && 
-                                                        !cleanUrl.includes('review') && 
-                                                        !cleanUrl.includes('customer');
-
-                                    if (isOfficial || isMainMedia) {
-                                        const vid = getVideoBase(cleanUrl);
-                                        if (!seenVideoIds.has(vid)) {
-                                            seenVideoIds.add(vid);
-                                            productVideos.push(cleanUrl);
-                                        }
+                                            const vid = getVideoBase(cleanUrl);
+                                            if (!seenVideoIds.has(vid)) {
+                                                seenVideoIds.add(vid);
+                                                productVideos.push(cleanUrl);
+                                            }
+                                        });
                                     }
                                 });
                             }
 
-                            // Store ALL official product videos found
+                            // STRATEGY 2: VSE Video Data (Amazon's video player data) - if Strategy 1 found nothing
+                            if (productVideos.length === 0) {
+                                const vsePatterns = [
+                                    /"vseVideoData"\s*:\s*(\[[\s\S]*?\])(?:\s*,|\s*\})/,
+                                    /"videoList"\s*:\s*(\[[\s\S]*?\])(?:\s*,|\s*\})/
+                                ];
+
+                                for (const vsePattern of vsePatterns) {
+                                    const vseMatch = html.match(vsePattern);
+                                    if (vseMatch) {
+                                        const videoBlock = vseMatch[1];
+                                        const lowerBlock = videoBlock.toLowerCase();
+
+                                        // Skip if this block is from brand/review context
+                                        const skipBlockPatterns = ['brandstory', 'brand-story', 'aplus', 'customer', 'review', 'ugc'];
+                                        if (skipBlockPatterns.some(p => lowerBlock.includes(p))) {
+                                            continue;
+                                        }
+
+                                        const videoUrls = videoBlock.match(/https?:\/\/[^"'\s,\]]+\.(mp4|m3u8|webm)[^"'\s,\]]*/gi);
+                                        if (videoUrls) {
+                                            videoUrls.forEach(vUrl => {
+                                                const cleanUrl = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '');
+                                                const vid = getVideoBase(cleanUrl);
+                                                if (!seenVideoIds.has(vid)) {
+                                                    seenVideoIds.add(vid);
+                                                    productVideos.push(cleanUrl);
+                                                }
+                                            });
+                                        }
+                                        if (productVideos.length > 0) break;
+                                    }
+                                }
+                            }
+
+                            // Store ONLY verified official product videos
                             if (productVideos.length > 0) {
                                 videoCache[variant.asin] = productVideos;
                                 console.log(`AMZImage: Found ${productVideos.length} official video(s) for ${variant.asin}`);
@@ -2344,15 +2370,27 @@ export default defineContentScript({
                 uniqueProductImages.unshift(hi);
             }
 
-            // SYNC: Update current variant with fully scraped gallery from main page
-            if (asin && variants.length > 0 && uniqueProductImages.length > 1) {
+            // SYNC: Update current variant with fully scraped gallery and videos from main page
+            if (asin && variants.length > 0) {
                 const currentVariant = variants.find(v => v.asin === asin);
                 if (currentVariant) {
-                    // Update if main gallery has more images or if variant has few
-                    if (!currentVariant.images || uniqueProductImages.length > currentVariant.images.length) {
-                        currentVariant.images = [...uniqueProductImages];
-                        // Keep map in sync
-                        scrapedVariantImagesByAsin[asin] = [...uniqueProductImages];
+                    // Images Sync
+                    if (uniqueProductImages.length > 1) {
+                        if (!currentVariant.images || uniqueProductImages.length > currentVariant.images.length) {
+                            currentVariant.images = [...uniqueProductImages];
+                            scrapedVariantImagesByAsin[asin] = [...uniqueProductImages];
+                        }
+                    }
+
+                    // Videos Sync - Crucial for the active variant
+                    const uniqueVideos = [...new Set(videos)];
+                    if (uniqueVideos.length > 0) {
+                        currentVariant.videos = uniqueVideos;
+                        // Also update global cache so it persists across panel refreshes
+                        // @ts-ignore
+                        if (!window._amzVideoCache) window._amzVideoCache = {};
+                        // @ts-ignore
+                        window._amzVideoCache[asin] = uniqueVideos;
                     }
                 }
             }

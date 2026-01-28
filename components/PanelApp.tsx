@@ -576,15 +576,15 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         if (showPreview) {
             const hasImages = variantImages && variantImages.length > 0;
             const hasVideos = variantVideos && variantVideos.length > 0;
-            
+
             if (hasImages || hasVideos) {
                 // Construct the full context: Images first, then Videos (Standard Gallery Order)
                 const allUrls = [...(variantImages || []), ...(variantVideos || [])];
-                
+
                 // Show the first item (Image #1 or Video #1)
                 const targetUrl = allUrls[0];
                 const targetType = hasImages ? 'image' : 'video';
-                
+
                 showPreview(targetUrl, targetType, allUrls);
             }
         }
@@ -821,6 +821,192 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     };
 
     // ============================================
+    // render functions
+    // ============================================
+
+    // Media Item
+    const renderMediaItem = (item: MediaItem, index: number) => {
+        const isSelected = selectedItems.has(item.url);
+        const isVideo = item.type === 'video';
+
+        return (
+            <div
+                key={`${item.url}-${index}`}
+                onClick={() => handlePreview(item)}
+                style={{
+                    position: 'relative',
+                    aspectRatio: '1',
+                    borderRadius: '16px',
+                    overflow: 'hidden',
+                    background: COLORS.backgroundSecondary,
+                    cursor: 'pointer',
+                    border: `2px solid ${isSelected ? COLORS.primary : 'transparent'}`,
+                    boxShadow: isSelected ? COLORS.shadowPrimary : COLORS.shadowSm,
+                    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                    boxSizing: 'border-box'
+                }}
+                className="media-item"
+            >
+                {isVideo ? (
+                    <video src={item.url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} muted playsInline />
+                ) : (
+                    <img src={item.url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" />
+                )}
+
+                {/* Badges */}
+                <div style={{ position: 'absolute', top: '8px', left: '8px', display: 'flex', gap: '4px', pointerEvents: 'none' }}>
+                    {isVideo && (
+                        <span style={{
+                            background: 'rgba(0, 0, 0, 0.5)', backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)',
+                            color: '#fff', fontSize: '9px', fontWeight: 800, padding: '3px 8px', borderRadius: '6px'
+                        }}>VIDEO</span>
+                    )}
+                </div>
+
+                {/* Selection Checkbox */}
+                <div
+                    onClick={(e) => toggleSelection(item.url, e)}
+                    style={{
+                        position: 'absolute', top: '8px', right: '8px', width: '24px', height: '24px',
+                        borderRadius: '50%', background: isSelected ? COLORS.primary : 'rgba(255,255,255,0.8)',
+                        backdropFilter: 'blur(4px)', border: isSelected ? 'none' : `1.5px solid rgba(0,0,0,0.1)`,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        boxShadow: isSelected ? COLORS.shadowMd : COLORS.shadowSm, transition: 'all 0.2s',
+                        zIndex: 10
+                    }}
+                >
+                    {isSelected && (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
+                    )}
+                </div>
+
+                {/* Hover Overlay */}
+                <div
+                    className="media-hover-overlay"
+                    style={{
+                        position: 'absolute', inset: 0,
+                        background: 'linear-gradient(to top, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0.2) 50%, transparent 100%)',
+                        opacity: 0, transition: 'opacity 0.2s ease', display: 'flex',
+                        flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end',
+                        padding: '12px', gap: '8px'
+                    }}
+                >
+                    <button
+                        onClick={(e) => { e.stopPropagation(); downloadSingle(item.url); }}
+                        style={{
+                            padding: '6px 12px', background: '#fff', borderRadius: '8px',
+                            fontSize: '11px', fontWeight: 700, color: COLORS.text, border: 'none',
+                            boxShadow: COLORS.shadowMd, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px'
+                        }}
+                    >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+                        Save
+                    </button>
+                </div>
+            </div>
+        );
+    };
+
+    // Listing Product Item
+    const renderListingProduct = (product: ListingProduct, index: number) => {
+        const isSelected = selectedItems.has(product.image);
+
+        return (
+            <div
+                key={`${product.asin}-${index}`}
+                style={{
+                    background: COLORS.surface,
+                    borderRadius: '20px',
+                    overflow: 'hidden',
+                    boxShadow: COLORS.shadowSm,
+                    border: `2px solid ${isSelected ? COLORS.primary : 'transparent'}`,
+                    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    boxSizing: 'border-box'
+                }}
+                className="listing-product"
+            >
+                <div
+                    onClick={() => handlePreview({ url: product.image, type: 'image', source: 'product', category: 'productImage' })}
+                    style={{
+                        aspectRatio: '1',
+                        position: 'relative',
+                        background: COLORS.backgroundSecondary,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        overflow: 'hidden'
+                    }}
+                >
+                    <img src={product.image} style={{ width: '85%', height: '85%', objectFit: 'contain', transition: 'transform 0.3s' }} className="listing-img" loading="lazy" />
+
+                    <div
+                        onClick={(e) => toggleSelection(product.image, e)}
+                        style={{
+                            position: 'absolute', top: '12px', right: '12px', width: '28px', height: '28px',
+                            borderRadius: '50%', background: isSelected ? COLORS.primary : 'rgba(255,255,255,0.9)',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            boxShadow: COLORS.shadowSm, zIndex: 5, transition: 'all 0.2s'
+                        }}
+                    >
+                        {isSelected && <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3.5"><polyline points="20 6 9 17 4 12" /></svg>}
+                    </div>
+                </div>
+
+                <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '8px', flex: 1 }}>
+                    <h4 style={{
+                        fontSize: '13px',
+                        fontWeight: 700,
+                        color: COLORS.text,
+                        margin: 0,
+                        display: '-webkit-box',
+                        WebkitLineClamp: 2,
+                        WebkitBoxOrient: 'vertical',
+                        overflow: 'hidden',
+                        height: '36px',
+                        lineHeight: '1.4'
+                    }}>
+                        {product.title}
+                    </h4>
+
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 'auto', paddingTop: '4px' }}>
+                        <span style={{
+                            fontSize: '10px',
+                            fontWeight: 800,
+                            color: COLORS.textMuted,
+                            background: COLORS.backgroundSecondary,
+                            padding: '3px 10px',
+                            borderRadius: '20px',
+                            letterSpacing: '0.3px'
+                        }}>{product.asin}</span>
+
+                        <button
+                            onClick={(e) => { e.stopPropagation(); downloadSingle(product.image); }}
+                            style={{
+                                width: '32px',
+                                height: '32px',
+                                background: COLORS.primarySoft,
+                                borderRadius: '10px',
+                                border: 'none',
+                                color: COLORS.primary,
+                                cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                transition: 'all 0.2s'
+                            }}
+                            className="listing-save-btn"
+                        >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
+    // ============================================
     // Welcome/Login Views
     // ============================================
     if (view === 'welcome') {
@@ -977,8 +1163,121 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     };
 
     // Variant List (Grouped Cards)
+    // Review Media Quick Bar - Fixed at the top for easy access
+    const renderReviewQuickBar = () => {
+        const reviewCount = categoryCounts.reviewImages + categoryCounts.reviewVideos;
+        if (!isProductPage || reviewCount === 0) return null;
+
+        return (
+            <div style={{
+                padding: '10px 16px',
+                background: COLORS.surface,
+                borderTop: `1px solid ${COLORS.borderLight}`,
+                boxShadow: '0 -4px 16px -2px rgba(0, 0, 0, 0.08)',
+                backdropFilter: 'blur(10px)',
+                transition: 'all 0.3s ease-in-out',
+                flexShrink: 0,
+                zIndex: 50
+            }}>
+                <div
+                    onClick={() => setReviewSectionExpanded(!reviewSectionExpanded)}
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        padding: '8px 12px',
+                        background: reviewSectionExpanded ? COLORS.primarySoft : COLORS.background,
+                        border: `1.2px solid ${reviewSectionExpanded ? COLORS.primary : COLORS.border}`,
+                        borderRadius: '10px',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease',
+                    }}
+                >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={COLORS.primary} strokeWidth="2.5">
+                            <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+                        </svg>
+                        <span style={{ fontSize: '12px', fontWeight: 700, color: COLORS.text }}>Review Media</span>
+                        <span style={{
+                            fontSize: '10px', fontWeight: 800,
+                            color: COLORS.primary,
+                            background: COLORS.primarySoft,
+                            padding: '1px 6px',
+                            borderRadius: '6px'
+                        }}>{reviewCount}</span>
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <button
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                const reviewItems = allMediaItems.filter(item => item.source === 'review').map(item => item.url);
+                                if (reviewItems.length > 0) {
+                                    const filename = `pixora-${productData?.asin || 'item'}-reviews-${Date.now()}`;
+                                    downloadZip(reviewItems, filename);
+                                }
+                            }}
+                            style={{
+                                padding: '3px 8px', background: COLORS.primary, border: 'none',
+                                borderRadius: '5px', fontSize: '10px', fontWeight: 600,
+                                color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '3px'
+                            }}
+                        >
+                            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                <polyline points="7 10 12 15 17 10" />
+                                <line x1="12" y1="15" x2="12" y2="3" />
+                            </svg>
+                            Save All
+                        </button>
+                        <svg
+                            width="14" height="14" viewBox="0 0 24 24" fill="none"
+                            stroke={COLORS.textMuted} strokeWidth="2.5"
+                            style={{
+                                transform: reviewSectionExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
+                                transition: 'transform 0.2s ease'
+                            }}
+                        >
+                            <polyline points="6 9 12 15 18 9" />
+                        </svg>
+                    </div>
+                </div>
+
+                {reviewSectionExpanded && (
+                    <div style={{
+                        marginTop: '8px', padding: '10px', background: COLORS.backgroundSecondary,
+                        borderRadius: '8px', border: `1px solid ${COLORS.borderLight}`
+                    }}>
+                        <div style={{ display: 'flex', gap: '4px', marginBottom: '8px' }}>
+                            {['images', 'videos'].map((type) => (
+                                <button
+                                    key={type}
+                                    onClick={() => setReviewSubTab(type as 'images' | 'videos')}
+                                    style={{
+                                        flex: 1, padding: '5px', borderRadius: '5px', border: 'none',
+                                        background: reviewSubTab === type ? COLORS.primarySoft : COLORS.surface,
+                                        color: reviewSubTab === type ? COLORS.primary : COLORS.textSecondary,
+                                        fontSize: '10px', fontWeight: 600, cursor: 'pointer'
+                                    }}
+                                >
+                                    {type.toUpperCase()}
+                                </button>
+                            ))}
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '4px' }}>
+                            {allMediaItems
+                                .filter(item => item.source === 'review' && item.type === (reviewSubTab === 'images' ? 'image' : 'video'))
+                                .slice(0, 8)
+                                .map((item, index) => renderMediaItem(item, index))}
+                        </div>
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    // Variant List - CONTENT GRID ONLY
     const renderVariantList = () => {
-        if (!isProductPage) return null;
         const baseVariants = productData?.variants || [];
         const allVariants = baseVariants.map(v => {
             const cachedImages = variantImagesCache[v.asin];
@@ -991,264 +1290,217 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         if (allVariants.length === 0) return null;
 
         return (
-            <div style={{ padding: '16px', background: COLORS.background }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
-                    <h3 style={{ fontSize: '15px', fontWeight: 800, color: COLORS.text, margin: 0 }}>Available Variants</h3>
-                    <span style={{ fontSize: '11px', color: COLORS.textMuted, fontWeight: 700 }}>{allVariants.length} TOTAL</span>
-                </div>
+            <div style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr',
+                gap: '16px',
+                width: '100%',
+                boxSizing: 'border-box'
+            }}>
+                {allVariants.map((variant) => {
+                    const isCurrent = selectedVariantAsin === variant.asin;
+                    const imageCount = variant.images?.length || 0;
+                    const videoCount = variant.videos?.length || 0;
+                    const totalCount = imageCount + videoCount;
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '16px' }}>
-                    {allVariants.map((variant) => {
-                        const isCurrent = selectedVariantAsin === variant.asin;
-                        const imageCount = variant.images?.length || 0;
-                        const videoCount = variant.videos?.length || 0;
-                        const totalCount = imageCount + videoCount;
+                    return (
+                        <div
+                            key={variant.asin}
+                            onClick={() => !selectingVariant && handleVariantSelect(variant.asin, variant.name, variant.images, variant.videos)}
+                            className="variant-card"
+                            style={{
+                                background: COLORS.surface,
+                                borderRadius: '12px',
+                                border: isCurrent ? `1.5px solid ${COLORS.primary}` : `1px solid ${COLORS.border}`,
+                                padding: '12px',
+                                cursor: selectingVariant ? 'wait' : 'pointer',
+                                transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+                                boxShadow: isCurrent ? COLORS.shadowPrimary : '0 1px 3px rgba(0,0,0,0.05)',
+                                position: 'relative',
+                                overflow: 'hidden',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: '8px',
+                                boxSizing: 'border-box'
+                            }}
+                        >
+                            <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                                <div style={{
+                                    width: '80px', height: '80px', borderRadius: '10px',
+                                    background: `url(${variant.image}) center/contain no-repeat`,
+                                    backgroundColor: COLORS.backgroundSecondary, flexShrink: 0,
+                                    border: `1px solid ${COLORS.borderLight}`
+                                }} />
 
-                        return (
-                            <div
-                                key={variant.asin}
-                                onClick={() => !selectingVariant && handleVariantSelect(variant.asin, variant.name, variant.images, variant.videos)}
-                                style={{
-                                    background: COLORS.surface, borderRadius: '16px', border: `2px solid ${isCurrent ? COLORS.primary : COLORS.border}`,
-                                    padding: '16px', cursor: selectingVariant ? 'wait' : 'pointer', transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                                    boxShadow: isCurrent ? COLORS.shadowPrimary : COLORS.shadowSm,
-                                    position: 'relative', overflow: 'hidden'
-                                }}
-                            >
-                                <div style={{ display: 'flex', gap: '16px' }}>
-                                    <div style={{
-                                        width: '84px', height: '84px', borderRadius: '12px',
-                                        background: `url(${variant.image}) center/contain no-repeat`,
-                                        backgroundColor: COLORS.backgroundSecondary, flexShrink: 0,
-                                        border: `1px solid ${COLORS.borderLight}`
-                                    }} />
-
-                                    <div style={{ flex: 1, minWidth: 0 }}>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                                            <div style={{ minWidth: 0, flex: 1 }}>
-                                                <h4 style={{
-                                                    fontSize: '14px', fontWeight: 700, color: isCurrent ? COLORS.primary : COLORS.text,
-                                                    margin: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
-                                                }}>{variant.name}</h4>
-                                                <p style={{ fontSize: '11px', color: COLORS.textMuted, margin: '4px 0 0 0', fontWeight: 600 }}>ASIN: {variant.asin}</p>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }}>
+                                        <div style={{ minWidth: 0, flex: 1 }}>
+                                            <h4 style={{
+                                                fontSize: '13px', fontWeight: 700, color: '#1a202c',
+                                                margin: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                                                lineHeight: '1.4'
+                                            }}>{variant.name}</h4>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '1px' }}>
+                                                <span style={{
+                                                    fontSize: '10px',
+                                                    color: '#64748b',
+                                                    fontWeight: 600,
+                                                    textTransform: 'uppercase',
+                                                    letterSpacing: '0.3px'
+                                                }}>ASIN: {variant.asin}</span>
                                             </div>
-                                            {isCurrent && (
-                                                <div style={{
-                                                    background: COLORS.primary, color: '#fff', fontSize: '9px',
-                                                    fontWeight: 900, padding: '3px 10px', borderRadius: '20px', textTransform: 'uppercase'
-                                                }}>Active</div>
-                                            )}
                                         </div>
+                                        {isCurrent && (
+                                            <div style={{
+                                                background: COLORS.primary,
+                                                color: '#fff',
+                                                fontSize: '9px',
+                                                fontWeight: 900,
+                                                padding: '3px 10px',
+                                                borderRadius: '30px',
+                                                textTransform: 'uppercase',
+                                                letterSpacing: '0.5px',
+                                                boxShadow: '0 4px 8px rgba(79, 70, 229, 0.25)'
+                                            }}>Active</div>
+                                        )}
+                                    </div>
 
-                                        <div style={{ display: 'flex', gap: '6px', marginTop: '12px', overflowX: 'auto' }} className="no-scrollbar">
-                                            {[
+                                    <div style={{ display: 'flex', gap: '5px', marginTop: '8px', overflowX: 'auto', paddingBottom: '2px' }} className="no-scrollbar">
+                                        {(() => {
+                                            const allItems = [
                                                 ...(variant.images || []).map(i => ({ type: 'image', url: i })),
                                                 ...(variant.videos || []).map(v => ({ type: 'video', url: v }))
-                                            ].map((item, i, displayArr) => (
-                                                <div 
-                                                    key={i} 
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        if (showPreview) {
-                                                            // Use ONLY the media from this variant for the preview context
-                                                            const contextUrls = displayArr.map(m => m.url);
-                                                            showPreview(item.url, item.type as 'image'|'video', contextUrls);
-                                                        }
-                                                    }}
-                                                    style={{
-                                                    width: '32px',
-                                                    height: '32px',
-                                                    borderRadius: '6px',
-                                                    overflow: 'hidden',
-                                                    position: 'relative',
-                                                    backgroundColor: COLORS.backgroundSecondary,
-                                                    border: `1px solid ${COLORS.borderLight}`,
-                                                    flexShrink: 0,
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    justifyContent: 'center',
-                                                    cursor: 'zoom-in' // Indicate it's clickable for preview
-                                                }}>
-                                                    {item.type === 'video' ? (
-                                                        <>
-                                                            <video src={item.url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                                                            <div style={{
-                                                                position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.3)',
-                                                                display: 'flex', alignItems: 'center', justifyContent: 'center'
+                                            ];
+                                            const visibleItems = allItems.slice(0, 5);
+                                            const remainingCount = allItems.length - 5;
+
+                                            return (
+                                                <>
+                                                    {visibleItems.map((item, i) => (
+                                                        <div
+                                                            key={i}
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                if (showPreview) {
+                                                                    const contextUrls = allItems.map(m => m.url);
+                                                                    showPreview(item.url, item.type as 'image' | 'video', contextUrls);
+                                                                }
+                                                            }}
+                                                            style={{
+                                                                width: '32px',
+                                                                height: '32px',
+                                                                borderRadius: '6px',
+                                                                overflow: 'hidden',
+                                                                position: 'relative',
+                                                                backgroundColor: COLORS.backgroundSecondary,
+                                                                border: `1px solid ${COLORS.borderLight}`,
+                                                                flexShrink: 0,
+                                                                display: 'flex',
+                                                                alignItems: 'center',
+                                                                justifyContent: 'center',
+                                                                cursor: 'zoom-in'
                                                             }}>
-                                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="white" stroke="white" strokeWidth="2">
-                                                                    <polygon points="5 3 19 12 5 21 5 3" />
-                                                                </svg>
-                                                            </div>
-                                                        </>
-                                                    ) : (
-                                                        <img src={item.url} style={{ width: '100%', height: '100%', objectFit: 'contain' }} loading="lazy" />
+                                                            {item.type === 'video' ? (
+                                                                <>
+                                                                    <video src={item.url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                                                                    <div style={{
+                                                                        position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.3)',
+                                                                        display: 'flex', alignItems: 'center', justifyContent: 'center'
+                                                                    }}>
+                                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="white" stroke="white" strokeWidth="2">
+                                                                            <polygon points="5 3 19 12 5 21 5 3" />
+                                                                        </svg>
+                                                                    </div>
+                                                                </>
+                                                            ) : (
+                                                                <img src={item.url} style={{ width: '100%', height: '100%', objectFit: 'contain' }} loading="lazy" />
+                                                            )}
+                                                        </div>
+                                                    ))}
+                                                    {remainingCount > 0 && (
+                                                        <div
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                if (showPreview) {
+                                                                    // Show preview starting from the 6th item
+                                                                    const contextUrls = allItems.map(m => m.url);
+                                                                    showPreview(allItems[5].url, allItems[5].type as 'image' | 'video', contextUrls);
+                                                                }
+                                                            }}
+                                                            style={{
+                                                                width: '32px',
+                                                                height: '32px',
+                                                                borderRadius: '6px',
+                                                                backgroundColor: COLORS.surface,
+                                                                border: `1px solid ${COLORS.borderLight}`,
+                                                                flexShrink: 0,
+                                                                display: 'flex',
+                                                                alignItems: 'center',
+                                                                justifyContent: 'center',
+                                                                cursor: 'pointer',
+                                                                fontSize: '10px',
+                                                                fontWeight: 700,
+                                                                color: COLORS.primary,
+                                                                background: COLORS.primarySoft
+                                                            }}
+                                                        >
+                                                            +{remainingCount}
+                                                        </div>
                                                     )}
-                                                </div>
-                                            ))}
-                                        </div>
+                                                </>
+                                            );
+                                        })()}
                                     </div>
-                                </div>
-
-                                <div style={{ marginTop: '14px', paddingTop: '14px', borderTop: `1px solid ${COLORS.borderLight}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                                    <div style={{ display: 'flex', gap: '8px' }}>
-                                        <span style={{ fontSize: '10px', fontWeight: 800, color: COLORS.textSecondary, background: COLORS.backgroundSecondary, padding: '4px 10px', borderRadius: '8px' }}>{imageCount} IMG</span>
-                                        {videoCount > 0 && <span style={{ fontSize: '10px', fontWeight: 800, color: COLORS.textSecondary, background: COLORS.backgroundSecondary, padding: '4px 10px', borderRadius: '8px' }}>{videoCount} VID</span>}
-                                    </div>
-
-                                    <button
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            const allMedia = [...(variant.images || []), ...(variant.videos || [])];
-                                            if (allMedia.length > 0) downloadZip(allMedia, `pixora-${variant.asin}`);
-                                        }}
-                                        disabled={selectingVariant}
-                                        style={{
-                                            padding: '8px 18px', borderRadius: '10px', background: isCurrent ? COLORS.primary : COLORS.surface,
-                                            border: `1.5px solid ${isCurrent ? 'transparent' : COLORS.border}`,
-                                            color: isCurrent ? '#fff' : COLORS.textSecondary, fontSize: '12px', fontWeight: 700,
-                                            cursor: 'pointer', transition: 'all 0.2s', display: 'flex', alignItems: 'center', gap: '6px'
-                                        }}
-                                    >
-                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-                                        Download All
-                                    </button>
                                 </div>
                             </div>
-                        );
-                    })}
-                </div>
+
+                            <div style={{ marginTop: '0px', paddingTop: '8px', borderTop: `1px solid ${COLORS.borderLight}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                <div style={{ display: 'flex', gap: '6px' }}>
+                                    <div style={{ background: COLORS.backgroundSecondary, padding: '3px 10px', borderRadius: '6px' }}>
+                                        <span style={{ fontSize: '10px', fontWeight: 700, color: COLORS.textSecondary, letterSpacing: '0.2px' }}>{imageCount} IMG</span>
+                                    </div>
+                                    {videoCount > 0 && (
+                                        <div style={{ background: COLORS.backgroundSecondary, padding: '3px 10px', borderRadius: '6px' }}>
+                                            <span style={{ fontSize: '10px', fontWeight: 700, color: COLORS.textSecondary, letterSpacing: '0.2px' }}>{videoCount} VID</span>
+                                        </div>
+                                    )}
+                                </div>
+
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        const allMedia = [...(variant.images || []), ...(variant.videos || [])];
+                                        if (allMedia.length > 0) downloadZip(allMedia, `pixora-${variant.asin}`);
+                                    }}
+                                    disabled={selectingVariant}
+                                    className="variant-download-btn"
+                                    style={{
+                                        padding: '6px 14px',
+                                        borderRadius: '8px',
+                                        background: COLORS.surface,
+                                        border: `1px solid ${COLORS.border}`,
+                                        color: COLORS.text,
+                                        fontSize: '12px',
+                                        fontWeight: 600,
+                                        cursor: 'pointer',
+                                        transition: 'all 0.2s',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '6px'
+                                    }}
+                                >
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+                                    Download
+                                </button>
+                            </div>
+                        </div>
+                    );
+                })}
             </div>
         );
     };
 
-    // Media Item
-    const renderMediaItem = (item: MediaItem, index: number) => {
-        const isSelected = selectedItems.has(item.url);
-        const isVideo = item.type === 'video';
 
-        return (
-            <div
-                key={`${item.url}-${index}`}
-                onClick={() => handlePreview(item)}
-                style={{
-                    position: 'relative', aspectRatio: '1', borderRadius: '14px',
-                    overflow: 'hidden', background: COLORS.backgroundSecondary,
-                    cursor: 'pointer', border: `2.5px solid ${isSelected ? COLORS.primary : 'transparent'}`,
-                    boxShadow: isSelected ? COLORS.shadowPrimary : COLORS.shadowSm,
-                    transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)'
-                }}
-                className="media-item"
-            >
-                {isVideo ? (
-                    <video src={item.url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} muted playsInline />
-                ) : (
-                    <img src={item.url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" />
-                )}
-
-                {/* Badges */}
-                <div style={{ position: 'absolute', top: '8px', left: '8px', display: 'flex', gap: '4px', pointerEvents: 'none' }}>
-                    {isVideo && (
-                        <span style={{
-                            background: 'rgba(0, 0, 0, 0.5)', backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)',
-                            color: '#fff', fontSize: '9px', fontWeight: 800, padding: '3px 8px', borderRadius: '6px'
-                        }}>VIDEO</span>
-                    )}
-                </div>
-
-                {/* Selection Checkbox */}
-                <div
-                    onClick={(e) => toggleSelection(item.url, e)}
-                    style={{
-                        position: 'absolute', top: '8px', right: '8px', width: '24px', height: '24px',
-                        borderRadius: '50%', background: isSelected ? COLORS.primary : 'rgba(255,255,255,0.8)',
-                        backdropFilter: 'blur(4px)', border: isSelected ? 'none' : `1.5px solid rgba(0,0,0,0.1)`,
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        boxShadow: isSelected ? COLORS.shadowMd : COLORS.shadowSm, transition: 'all 0.2s',
-                        zIndex: 10
-                    }}
-                >
-                    {isSelected && (
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
-                    )}
-                </div>
-
-                {/* Hover Overlay */}
-                <div
-                    className="media-hover-overlay"
-                    style={{
-                        position: 'absolute', inset: 0,
-                        background: 'linear-gradient(to top, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0.2) 50%, transparent 100%)',
-                        opacity: 0, transition: 'opacity 0.2s ease', display: 'flex',
-                        flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end',
-                        padding: '12px', gap: '8px'
-                    }}
-                >
-                    <button
-                        onClick={(e) => { e.stopPropagation(); downloadSingle(item.url); }}
-                        style={{
-                            padding: '6px 12px', background: '#fff', borderRadius: '8px',
-                            fontSize: '11px', fontWeight: 700, color: COLORS.text, border: 'none',
-                            boxShadow: COLORS.shadowMd, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px'
-                        }}
-                    >
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-                        Save
-                    </button>
-                </div>
-            </div>
-        );
-    };
-
-    // Listing Product Item
-    const renderListingProduct = (product: ListingProduct, index: number) => {
-        const isSelected = selectedItems.has(product.image);
-
-        return (
-            <div
-                key={`${product.asin}-${index}`}
-                style={{
-                    background: COLORS.surface, borderRadius: '16px', overflow: 'hidden',
-                    boxShadow: COLORS.shadowSm, border: `2.5px solid ${isSelected ? COLORS.primary : 'transparent'}`,
-                    transition: 'all 0.3s'
-                }}
-                className="listing-product"
-            >
-                <div
-                    onClick={() => handlePreview({ url: product.image, type: 'image', source: 'product', category: 'productImage' })}
-                    style={{ aspectRatio: '1', position: 'relative', background: COLORS.backgroundSecondary, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                >
-                    <img src={product.image} style={{ width: '90%', height: '90%', objectFit: 'contain' }} loading="lazy" />
-
-                    <div
-                        onClick={(e) => toggleSelection(product.image, e)}
-                        style={{
-                            position: 'absolute', top: '10px', right: '10px', width: '26px', height: '26px',
-                            borderRadius: '50%', background: isSelected ? COLORS.primary : 'rgba(255,255,255,0.9)',
-                            display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: COLORS.shadowSm
-                        }}
-                    >
-                        {isSelected && <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>}
-                    </div>
-                </div>
-
-                <div style={{ padding: '12px' }}>
-                    <h4 style={{ fontSize: '13px', fontWeight: 600, color: COLORS.text, margin: '0 0 4px 0', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', height: '34px' }}>
-                        {product.title}
-                    </h4>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '8px' }}>
-                        <span style={{ fontSize: '10px', fontWeight: 700, color: COLORS.textMuted, background: COLORS.backgroundSecondary, padding: '2px 8px', borderRadius: '4px' }}>{product.asin}</span>
-                        <button
-                            onClick={(e) => { e.stopPropagation(); downloadSingle(product.image); }}
-                            style={{ padding: '4px', background: 'none', border: 'none', color: COLORS.primary, cursor: 'pointer' }}
-                        >
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-                        </button>
-                    </div>
-                </div>
-            </div>
-        );
-    };
 
     // Check if we have content
     const hasContent = isProductPage ? allMediaItems.length > 0 : filteredListingProducts.length > 0;
@@ -1279,24 +1531,97 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0,
                 position: 'sticky', top: 0, zIndex: 100, boxShadow: '0 2px 10px rgba(0,0,0,0.02)'
             }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                    <div style={{
-                        width: '36px', height: '36px', borderRadius: '10px',
-                        background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.primaryHover})`,
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        boxShadow: COLORS.shadowMd, color: 'white'
-                    }}>
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                            <polyline points="7 10 12 15 17 10" />
-                            <line x1="12" y1="15" x2="12" y2="3" />
-                        </svg>
-                    </div>
-                    <div>
-                        <h1 style={{ fontSize: '16px', fontWeight: 800, color: COLORS.text, margin: 0 }}>Pixora</h1>
-                        <p style={{ fontSize: '11px', color: COLORS.textMuted, margin: 0, fontWeight: 500 }}>Premium Amazon Downloader</p>
-                    </div>
-                </div>
+
+
+                {isProductPage && allVariants.length > 0 && (
+                    <button
+                        onClick={() => {
+                            // Download ALL variants with folder structure + Consolidated Folders
+                            console.log('Download All Clicked');
+                            const downloadItems: { url: string; filename: string }[] = [];
+
+                            allVariants.forEach(v => {
+                                // 1. Sanitize variant Name for folder usage
+                                const safeName = (v.name || v.asin).replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '');
+                                const folderName = `Variant_${safeName}`;
+
+                                // 2. Add Images
+                                if (v.images && v.images.length > 0) {
+                                    v.images.forEach((url, idx) => {
+                                        // Extract extension carefully
+                                        let ext = 'jpg';
+                                        try {
+                                            const urlObj = new URL(url);
+                                            const parts = urlObj.pathname.split('.');
+                                            if (parts.length > 1) ext = parts[parts.length - 1];
+                                        } catch (e) { /* fallback */ }
+
+                                        // A. Structured Variant Folder
+                                        downloadItems.push({
+                                            url,
+                                            filename: `${folderName}/images/${idx + 1}.${ext}`
+                                        });
+
+                                        // B. Global Consolidated Folder (Accumulate ALL images here)
+                                        downloadItems.push({
+                                            url,
+                                            filename: `images/${safeName}_${idx + 1}.${ext}`
+                                        });
+                                    });
+                                }
+
+                                // 3. Add Videos
+                                if (v.videos && v.videos.length > 0) {
+                                    v.videos.forEach((url, idx) => {
+                                        let ext = 'mp4';
+                                        try {
+                                            const urlObj = new URL(url);
+                                            const parts = urlObj.pathname.split('.');
+                                            if (parts.length > 1) ext = parts[parts.length - 1];
+                                        } catch (e) { /* fallback */ }
+
+                                        // A. Structured Variant Folder
+                                        downloadItems.push({
+                                            url,
+                                            filename: `${folderName}/videos/${idx + 1}.${ext}`
+                                        });
+
+                                        // B. Global Consolidated Folder
+                                        downloadItems.push({
+                                            url,
+                                            filename: `videos/${safeName}_${idx + 1}.${ext}`
+                                        });
+                                    });
+                                }
+                            });
+
+                            console.log(`Preparing download for ${downloadItems.length / 2} unique items (duplicated for structure)`);
+
+                            if (downloadItems.length > 0) {
+                                downloadZip(downloadItems, `pixora-all-variants-${Date.now()}`);
+                            } else {
+                                console.warn('No items found for download all variants');
+                            }
+                        }}
+                        style={{
+                            padding: '6px 12px',
+                            background: COLORS.primarySoft,
+                            color: COLORS.primary,
+                            borderRadius: '8px',
+                            fontSize: '11px',
+                            fontWeight: 700,
+                            border: 'none',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            transition: 'all 0.2s'
+                        }}
+                    >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+                        Download All ({allVariants.length})
+                    </button>
+                )}
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <button
@@ -1572,332 +1897,71 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             <main style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
                 {loading ? renderLoading() : !hasContent ? renderEmpty() : (
                     <>
-                        {/* MEDIA GRID SECTION - Conditionally rendered based on productMediaExpanded */}
-                        {isProductPage && SHOW_PRODUCT_MEDIA_SECTION && productMediaExpanded && (
+                        {/* Persistent Variants Header (Only for Product Images Tab) */}
+                        {isProductPage && mainTab === 'product' && subTab === 'images' && allVariants.length > 0 && (
                             <div style={{
-                                padding: '12px',
-                                borderBottom: `1px solid ${COLORS.borderLight}`,
+                                padding: '12px 16px',
                                 background: COLORS.surface,
-                                // When expanded, allow shrinking to fit and handle scrolling
-                                flexShrink: showAllItems ? 1 : 0,
-                                overflowY: 'auto',
-                                // Max height of ~3 rows when expanded to keep variant list visible
-                                maxHeight: showAllItems ? '340px' : 'none',
-                                transition: 'all 0.3s ease-in-out',
-                                position: 'relative'
+                                borderBottom: `1px solid ${COLORS.borderLight}`,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                flexShrink: 0,
+                                zIndex: 40,
+                                boxShadow: '0 2px 4px rgba(0,0,0,0.02)'
                             }}>
-                                <div style={{
-                                    transition: 'opacity 0.4s ease-in-out',
-                                    opacity: selectingVariant ? 0.5 : 1,
-                                    filter: selectingVariant ? 'grayscale(0.5)' : 'none'
-                                }}>
-                                    {/* Get current items based on mainTab and subTab */}
-                                    <div style={{
-                                        display: 'grid',
-                                        gridTemplateColumns: 'repeat(3, 1fr)',
-                                        gap: '10px'
-                                    }}>
-                                        {filteredMediaItems.slice(0, showAllItems ? undefined : INITIAL_ITEMS_COUNT).map((item, index) => renderMediaItem(item, index))}
+                                <h3 style={{ fontSize: '14px', fontWeight: 800, color: COLORS.text, margin: 0 }}>Available Variants</h3>
+                                <span style={{ fontSize: '11px', color: COLORS.textMuted, fontWeight: 700 }}>{allVariants.length} TOTAL</span>
+                            </div>
+                        )}
+
+                        <div className="scroll-container" style={{
+                            flex: 1,
+                            overflowY: 'auto',
+                            background: COLORS.background,
+                            display: 'flex',
+                            flexDirection: 'column',
+                            padding: '16px',
+                            boxSizing: 'border-box'
+                        }}>
+                            {/* Product Variants List */}
+                            {isProductPage && mainTab === 'product' && subTab === 'images' && renderVariantList()}
+
+                            {/* Standard Media Grid (For other tabs) */}
+                            {!(isProductPage && mainTab === 'product' && subTab === 'images') && !isListingPage && (
+                                <div style={{ width: '100%' }}>
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px' }}>
+                                        {displayedItems.map((item, index) => renderMediaItem(item, index))}
                                     </div>
 
-                                    {/* Show More Button */}
-                                    {filteredMediaItems.length > INITIAL_ITEMS_COUNT && !showAllItems && (
+                                    {hasMoreItems && !showAllItems && (
                                         <button
                                             onClick={() => setShowAllItems(true)}
                                             style={{
-                                                width: '100%',
-                                                marginTop: '12px',
-                                                padding: '10px',
-                                                background: COLORS.background,
-                                                border: `1px solid ${COLORS.border}`,
-                                                borderRadius: '8px',
-                                                fontSize: '12px',
-                                                fontWeight: 600,
-                                                color: COLORS.primary,
-                                                cursor: 'pointer',
-                                                display: 'flex',
-                                                alignItems: 'center',
-                                                justifyContent: 'center',
-                                                gap: '6px'
+                                                width: '100%', marginTop: '16px', padding: '10px',
+                                                background: COLORS.surface, border: `1px solid ${COLORS.border}`,
+                                                borderRadius: '10px', fontSize: '12px', fontWeight: 600,
+                                                color: COLORS.primary, cursor: 'pointer', display: 'flex',
+                                                alignItems: 'center', justifyContent: 'center', gap: '6px'
                                             }}
                                         >
-                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                                <polyline points="6 9 12 15 18 9" />
-                                            </svg>
-                                            Show {filteredMediaItems.length - INITIAL_ITEMS_COUNT} More
+                                            Show More ({hiddenCount})
                                         </button>
                                     )}
-
-                                    {/* Show Less Button */}
-                                    {showAllItems && filteredMediaItems.length > INITIAL_ITEMS_COUNT && (
-                                        <button
-                                            onClick={() => setShowAllItems(false)}
-                                            style={{
-                                                width: '100%',
-                                                marginTop: '12px',
-                                                padding: '10px',
-                                                background: COLORS.background,
-                                                border: `1px solid ${COLORS.border}`,
-                                                borderRadius: '8px',
-                                                fontSize: '12px',
-                                                fontWeight: 600,
-                                                color: COLORS.primary,
-                                                cursor: 'pointer',
-                                                display: 'flex',
-                                                alignItems: 'center',
-                                                justifyContent: 'center',
-                                                gap: '6px'
-                                            }}
-                                        >
-                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                                <polyline points="18 15 12 9 6 15" />
-                                            </svg>
-                                            Show Less
-                                        </button>
-                                    )}
-
-
-                                    {/* Empty state for current selection */}
-                                    {filteredMediaItems.length === 0 && (
-                                        <div style={{
-                                            padding: '40px 20px',
-                                            textAlign: 'center',
-                                            color: COLORS.textMuted
-                                        }}>
-                                            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ opacity: 0.4, marginBottom: '12px' }}>
-                                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                                                <circle cx="8.5" cy="8.5" r="1.5" />
-                                                <polyline points="21 15 16 10 5 21" />
-                                            </svg>
-                                            <p style={{ fontSize: '13px', fontWeight: 500 }}>
-                                                No {mainTab} {subTab} found
-                                            </p>
-                                        </div>
-                                    )}
                                 </div>
-                            </div>
-                        )}
+                            )}
 
-                        {/* COLLAPSIBLE REVIEW MEDIA SECTION - Between Product Images and Variants */}
-                        {isProductPage && mainTab === 'product' && (categoryCounts.reviewImages > 0 || categoryCounts.reviewVideos > 0) && (
-                            <div style={{
-                                width: '100%',
-                                background: COLORS.surface,
-                                borderBottom: `1px solid ${COLORS.borderLight}`,
-                                flexShrink: 0
-                            }}>
-                                {/* Review Section Header (Collapsible) */}
-                                <div style={{
-                                    borderTop: `1px solid ${COLORS.borderLight}`,
-                                    background: reviewSectionExpanded ? COLORS.background : COLORS.surface,
-                                    transition: 'all 0.2s ease',
-                                }}>
-                                    <div
-                                        onClick={() => setReviewSectionExpanded(!reviewSectionExpanded)}
-                                        style={{
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            justifyContent: 'space-between',
-                                            padding: '12px 16px',
-                                            cursor: 'pointer',
-                                            userSelect: 'none'
-                                        }}
-                                    >
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={COLORS.primary} strokeWidth="2.5">
-                                                <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
-                                            </svg>
-                                            <span style={{
-                                                fontSize: '14px',
-                                                fontWeight: 700,
-                                                color: COLORS.text,
-                                                letterSpacing: '-0.2px'
-                                            }}>
-                                                Review Media
-                                                <span style={{
-                                                    marginLeft: '8px',
-                                                    fontSize: '11px',
-                                                    color: COLORS.textSecondary,
-                                                    fontWeight: 500,
-                                                    background: COLORS.background,
-                                                    padding: '2px 8px',
-                                                    borderRadius: '10px',
-                                                    border: `1px solid ${COLORS.border}`
-                                                }}>
-                                                    {categoryCounts.reviewImages + categoryCounts.reviewVideos}
-                                                </span>
-                                            </span>
-                                        </div>
-
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                                            {/* Download Button (Only visible if expanded or always? Let's keep it clean, distinct from chevron) */}
-                                            <button
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    const reviewItems = allMediaItems.filter(item => item.source === 'review').map(item => item.url);
-                                                    if (reviewItems.length > 0) {
-                                                        const filename = `pixora-${productData?.asin || 'item'}-reviews-${Date.now()}`;
-                                                        downloadZip(reviewItems, filename);
-                                                    }
-                                                }}
-                                                className="download-btn-hover"
-                                                style={{
-                                                    padding: '6px 12px',
-                                                    background: 'transparent',
-                                                    border: `1px solid ${COLORS.primary}`,
-                                                    borderRadius: '8px',
-                                                    fontSize: '11px',
-                                                    fontWeight: 600,
-                                                    color: COLORS.primary,
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    gap: '6px',
-                                                    cursor: 'pointer',
-                                                    transition: 'all 0.2s ease'
-                                                }}
-                                                onMouseEnter={(e) => {
-                                                    e.currentTarget.style.background = COLORS.primarySoft;
-                                                }}
-                                                onMouseLeave={(e) => {
-                                                    e.currentTarget.style.background = 'transparent';
-                                                }}
-                                            >
-                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                                                    <polyline points="7 10 12 15 17 10" />
-                                                    <line x1="12" y1="15" x2="12" y2="3" />
-                                                </svg>
-                                                Download
-                                            </button>
-
-                                            <svg
-                                                width="16" height="16" viewBox="0 0 24 24" fill="none"
-                                                stroke={COLORS.textMuted} strokeWidth="2"
-                                                style={{
-                                                    transform: reviewSectionExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
-                                                    transition: 'transform 0.2s ease'
-                                                }}
-                                            >
-                                                <polyline points="6 9 12 15 18 9" />
-                                            </svg>
-                                        </div>
+                            {/* Listing Page Content */}
+                            {isListingPage && (
+                                <div style={{ width: '100%' }}>
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px' }}>
+                                        {filteredListingProducts.map((product, index) => renderListingProduct(product, index))}
                                     </div>
                                 </div>
+                            )}
+                        </div>
 
-                                {/* Review Section Content */}
-                                {reviewSectionExpanded && (
-                                    <div style={{
-                                        padding: '12px 16px',
-                                        background: COLORS.background,
-                                        borderRadius: '0'
-                                    }}>
-                                        {/* Review Sub-Tabs */}
-                                        <div style={{
-                                            marginBottom: '14px',
-                                        }}>
-                                            {/* Left: Filter Pills */}
-                                            <div style={{
-                                                display: 'flex',
-                                                gap: '4px',
-                                                background: COLORS.background,
-                                                padding: '3px',
-                                                borderRadius: '8px',
-                                                width: 'fit-content'
-                                            }}>
-                                                <button
-                                                    onClick={() => setReviewSubTab('images')}
-                                                    style={{
-                                                        display: 'flex', alignItems: 'center', gap: '4px',
-                                                        padding: '4px 8px', borderRadius: '6px',
-                                                        border: 'none',
-                                                        background: reviewSubTab === 'images' ? COLORS.primarySoft : 'transparent',
-                                                        color: reviewSubTab === 'images' ? COLORS.primary : COLORS.textSecondary,
-                                                        fontSize: '11px', fontWeight: 600,
-                                                        cursor: categoryCounts.reviewImages === 0 ? 'not-allowed' : 'pointer',
-                                                        opacity: categoryCounts.reviewImages === 0 ? 0.5 : 1,
-                                                        boxShadow: 'none',
-                                                        transition: 'all 0.2s ease'
-                                                    }}
-                                                    disabled={categoryCounts.reviewImages === 0}
-                                                >
-                                                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                                                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                                                        <circle cx="8.5" cy="8.5" r="1.5" />
-                                                        <polyline points="21 15 16 10 5 21" />
-                                                    </svg>
-                                                    {categoryCounts.reviewImages}
-                                                </button>
-                                                <button
-                                                    onClick={() => setReviewSubTab('videos')}
-                                                    style={{
-                                                        display: 'flex', alignItems: 'center', gap: '4px',
-                                                        padding: '4px 8px', borderRadius: '6px',
-                                                        border: 'none',
-                                                        background: reviewSubTab === 'videos' ? COLORS.primarySoft : 'transparent',
-                                                        color: reviewSubTab === 'videos' ? COLORS.primary : COLORS.textSecondary,
-                                                        fontSize: '11px', fontWeight: 600,
-                                                        cursor: categoryCounts.reviewVideos === 0 ? 'not-allowed' : 'pointer',
-                                                        opacity: categoryCounts.reviewVideos === 0 ? 0.5 : 1,
-                                                        boxShadow: 'none',
-                                                        transition: 'all 0.2s ease'
-                                                    }}
-                                                    disabled={categoryCounts.reviewVideos === 0}
-                                                >
-                                                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                                                        <polygon points="5 3 19 12 5 21 5 3" />
-                                                    </svg>
-                                                    {categoryCounts.reviewVideos}
-                                                </button>
-                                            </div>
-                                        </div>
-
-                                        {/* Review Media Grid */}
-                                        <div style={{
-                                            display: 'grid',
-                                            gridTemplateColumns: 'repeat(3, 1fr)',
-                                            gap: '10px'
-                                        }}>
-                                            {allMediaItems
-                                                .filter(item => item.source === 'review' && item.type === (reviewSubTab === 'images' ? 'image' : 'video'))
-                                                .slice(0, 9)
-                                                .map((item, index) => renderMediaItem(item, index))}
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        )}
-
-                        {/* SCROLLABLE VARIANTS SECTION - Only for Product Images */}
-                        {isProductPage && mainTab === 'product' && subTab === 'images' && allVariants.length > 0 && (
-                            <>
-                                {/* Visual separator */}
-                                <div style={{
-                                    height: '6px',
-                                    background: `linear-gradient(to bottom, ${COLORS.surface}, ${COLORS.background})`,
-                                    flexShrink: 0
-                                }} />
-                                <div
-                                    className="scroll-container"
-                                    style={{
-                                        flex: 1,
-                                        overflowY: 'auto',
-                                        padding: '12px',
-                                        background: COLORS.background
-                                    }}
-                                >
-                                    {renderVariantList()}
-                                </div>
-                            </>
-                        )}
-
-                        {/* Listing Grid */}
-                        {isListingPage && (
-                            <div style={{ flex: 1, overflowY: 'auto', padding: '12px' }}>
-                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px' }}>
-                                    {filteredListingProducts.map((product, index) => renderListingProduct(product, index))}
-                                </div>
-                            </div>
-                        )}
+                        {renderReviewQuickBar()}
                     </>
                 )}
             </main>
