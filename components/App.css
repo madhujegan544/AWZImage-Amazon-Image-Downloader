@@ -319,13 +319,11 @@ video {
 }
 
 .variant-option-hover:hover {
-    transform: translateY(-2px);
     box-shadow: var(--shadow-md) !important;
     background-color: var(--surface) !important;
     z-index: 5;
 }
 
 .variant-option-hover:active {
-    transform: translateY(0);
     box-shadow: var(--shadow-sm) !important;
 }
