@@ -909,6 +909,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             <div
                 key={`${item.url}-${index}`}
                 onClick={() => handlePreview(item)}
+                title="Click to preview"
                 style={{
                     position: 'relative',
                     aspectRatio: '1',
@@ -1005,6 +1006,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             >
                 <div
                     onClick={() => handlePreview({ url: product.image, type: 'image', source: 'product', category: 'productImage' })}
+                    title="Click to preview"
                     style={{
                         aspectRatio: '1',
                         position: 'relative',
@@ -1353,7 +1355,20 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
     // Variant List - CONTENT GRID ONLY
     const renderVariantList = () => {
-        const baseVariants = productData?.variants || [];
+        let baseVariants = productData?.variants || [];
+
+        // If no variants found, treat the current product as the single available "variant"
+        if (baseVariants.length === 0 && productData) {
+            baseVariants = [{
+                asin: productData.asin,
+                name: productData.title,
+                image: productData.productImages?.[0] || '', // Use first image as thumb
+                isAvailable: true,
+                images: productData.productImages || [],
+                videos: productData.videos || []
+            }];
+        }
+
         const allVariants = baseVariants.map(v => {
             const cachedImages = variantImagesCache[v.asin];
             if (cachedImages && cachedImages.length > 0) {
@@ -1383,6 +1398,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             key={variant.asin}
                             onClick={() => !selectingVariant && handleVariantSelect(variant.asin, variant.name, variant.images, variant.videos)}
                             className="variant-card"
+                            title="Click to preview variant"
                             style={{
                                 background: COLORS.surface,
                                 borderRadius: '12px',
@@ -1455,6 +1471,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                                     {visibleItems.map((item, i) => (
                                                         <div
                                                             key={i}
+                                                            title="Click to preview"
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
                                                                 if (showPreview) {
@@ -2011,7 +2028,6 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 
                 .media-item:hover .media-hover-overlay { opacity: 1 !important; }
                 .media-item:hover { 
-                    /* transform: translateY(-2px); Removed to prevent upward movement */
                     box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.02) !important;
                     z-index: 5;
                 }
@@ -2020,13 +2036,11 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 .listing-image:hover .listing-hover-overlay { opacity: 1 !important; }
                 .listing-product { transition: transform 0.2s ease, box-shadow 0.2s ease; }
                 .listing-product:hover { 
-                    /* transform: translateY(-2px); */
                     box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05); 
                 }
                 
                 /* Variant cards */
                 .variant-option-hover:hover { 
-                    /* transform: translateY(-2px) !important; */
                     box-shadow: ${COLORS.shadowMd} !important;
                     background: ${COLORS.surface} !important;
                     z-index: 5;

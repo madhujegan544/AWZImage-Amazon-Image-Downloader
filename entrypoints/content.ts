@@ -175,7 +175,8 @@ export default defineContentScript({
 
                     <style>
                         @keyframes amzFadeIn { from { opacity: 0; transform: scale(0.98); } to { opacity: 1; transform: scale(1); } }
-                        #amz-preview-close:hover, #amz-preview-prev:hover, #amz-preview-next:hover { background: rgba(255,255,255,0.2) !important; transform:${previewState.urls.length > 1 ? 'translateY(-50%)' : ''} scale(1.05); }
+                        #amz-preview-close:hover { background: rgba(255,255,255,0.2) !important; transform: scale(1.1); }
+                        #amz-preview-prev:hover, #amz-preview-next:hover { background: rgba(255,255,255,0.2) !important; transform: translateY(-50%) scale(1.1); }
                         #amz-preview-download:hover { transform: translateX(-50%) scale(1.05); box-shadow: 0 10px 30px rgba(123, 127, 242, 0.5); }
                         #amz-preview-download:active { transform: translateX(-50%) scale(0.98); }
                     </style>
