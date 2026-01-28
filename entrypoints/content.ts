@@ -68,6 +68,10 @@ export default defineContentScript({
                         // @ts-ignore
                         if (window._amzVideoCache) window._amzVideoCache = {};
 
+                        // Clear image cache to prevent stale variant images from previous product
+                        // @ts-ignore
+                        if (window._amzImageCache) window._amzImageCache = {};
+
                         notifyContentChange('product_changed');
                     }
                 }

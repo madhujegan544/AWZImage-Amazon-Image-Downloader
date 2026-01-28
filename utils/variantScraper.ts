@@ -77,7 +77,12 @@ function hydrateAllVariantImages(
 
 export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
     const variants: VariantItem[] = [];
-    const scripts = document.querySelectorAll('script:not([src])');
+
+    // FIX: Restrict script search to the main product container to avoid picking up 
+    // stale scripts from previous pages (if Amazon didn't fully clear the DOM).
+    // Using #dp (Desktop Product) or #ppd (Product Page Detail) is safer than scanning the whole document.
+    const scraperRoot = document.getElementById('dp') || document.getElementById('ppd') || document.body;
+    const scripts = scraperRoot.querySelectorAll('script:not([src])');
 
     let colorToAsin: Record<string, string> = {};
     let colorImages: Record<string, string[]> = {};
@@ -196,42 +201,56 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
        🔧 FIX APPLICATION (NEW)
        ============================ */
 
-    // Scrape DOM swatches for thumbnails - BROADENED SELECTOR
+    // Scrape DOM swatches for thumbnails - TARGETED SELECTOR
     const domThumbnails: Record<string, string> = {};
-    // Look for any element with data-asin (li, span, div, input, etc)
-    document.querySelectorAll('[data-asin], [data-defaultasin]').forEach(el => {
-        const asin = el.getAttribute('data-asin') || el.getAttribute('data-defaultasin');
-        if (!asin) return;
 
-        // Strategy: Look for img inside, or if the element itself is an img
-        let img = el.querySelector('img');
-        if (!img && el.tagName === 'IMG') img = el as HTMLImageElement;
+    // START FIX: Restrict search to variation containers only
+    // This prevents picking up "Recommended Products" or "Frequently bought together" items 
+    // which also have data-asin attributes.
+    const variationContainer = document.querySelector(
+        '#twister, #twisterContainer, #softlinesTwister, #tmmSwatches, [id^="variation_"], #icebreaker-variations'
+    );
 
-        // Sometimes the image is in a sibling or parent label (handling specific layouts)
-        if (!img && el.tagName === 'INPUT') {
-            const id = el.getAttribute('id');
-            if (id) {
-                const label = document.querySelector(`label[for="${id}"]`);
-                if (label) img = label.querySelector('img');
+    if (variationContainer) {
+        // Look for any element with data-asin (li, span, div, input, etc) INSIDE the container
+        variationContainer.querySelectorAll('[data-asin], [data-defaultasin]').forEach(el => {
+            const asin = el.getAttribute('data-asin') || el.getAttribute('data-defaultasin');
+            if (!asin) return;
+
+            // Strategy: Look for img inside, or if the element itself is an img
+            let img = el.querySelector('img');
+            if (!img && el.tagName === 'IMG') img = el as HTMLImageElement;
+
+            // Sometimes the image is in a sibling or parent label (handling specific layouts)
+            if (!img && el.tagName === 'INPUT') {
+                const id = el.getAttribute('id');
+                if (id) {
+                    const label = document.querySelector(`label[for="${id}"]`);
+                    if (label) img = label.querySelector('img');
+                }
             }
-        }
 
-        if (asin && img && img.src) {
-            domThumbnails[asin] = maximizeImageQuality(img.src);
-        }
-    });
+            if (asin && img && img.src) {
+                domThumbnails[asin] = maximizeImageQuality(img.src);
+            }
+        });
+    }
+    // END FIX
 
     const allVariantAsins = new Set([
         ...Object.keys(dimensionValues),
         ...Object.values(colorToAsin),
-        ...Object.keys(globalCache),
+        // FIX: Do NOT include globalCache keys here. 
+        // Cache should only be a data source for images, not a source of truth for *existence* of variants.
+        // This prevents variants from previously visited products (persisted in SPA navigation) 
+        // from showing up on the current product page.
         ...Object.keys(domThumbnails)
     ]);
 
     hydrateAllVariantImages(asinToImages, allVariantAsins, globalCache);
 
     /* ========= BUILD VARIANTS ========= */
-    // If dimensionValues is empty (some pages don't use it), try built from all known ASINs
+    // If dimensionValues is empty (some pages don't use it), try built from all known ASINs (derived from Page/DOM only)
     const asinsToBuild = Object.keys(dimensionValues).length > 0
         ? Object.keys(dimensionValues)
         : Array.from(allVariantAsins);
@@ -269,6 +288,25 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
             available: true
         });
     });
+
+    // Fallback: If no variants found (singleton product), ensure we return the current product
+    if (variants.length === 0 && currentAsin) {
+        // Try to find the main image
+        const mainImg = document.querySelector('#landingImage') as HTMLImageElement;
+        const mainUrl = mainImg ? maximizeImageQuality(mainImg.src) : '';
+
+        // Check if we have images from scripts even if we didn't build variants
+        const scriptImages = asinToImages[currentAsin] || [];
+
+        variants.push({
+            asin: currentAsin,
+            name: "Product",
+            image: mainUrl || (scriptImages.length > 0 ? scriptImages[0] : ''),
+            images: scriptImages.length > 0 ? scriptImages : (mainUrl ? [mainUrl] : []),
+            selected: true,
+            available: true
+        });
+    }
 
     return variants;
 }

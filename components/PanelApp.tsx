@@ -4,7 +4,7 @@
  * Version 2.2.0 - With Preview & Variant Selection
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { browser } from 'wxt/browser';
 import './App.css';
 import Welcome from './Welcome';
@@ -385,20 +385,27 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         return allMediaItems;
     }, [allMediaItems, mainTab, subTab, isListingPage]);
 
-    // URLs for preview navigation (based on current tab selection)
+    // URLs for preview navigation (based on item category)
     const getPreviewUrls = (item: MediaItem): string[] => {
-        // Filter based on current mainTab and subTab
+        // Fix: Use the item's OWN category to determine the preview context.
+        // This allows clicking review images in the Quick Bar (while on Product tab) to works correctly.
         let currentItems: typeof allMediaItems = [];
-        if (mainTab === 'product' && subTab === 'images') {
+
+        if (item.category === 'productImage') {
             currentItems = allMediaItems.filter(i => i.category === 'productImage');
-        } else if (mainTab === 'product' && subTab === 'videos') {
+        } else if (item.category === 'productVideo') {
             currentItems = allMediaItems.filter(i => i.category === 'productVideo');
-        } else if (mainTab === 'review' && subTab === 'images') {
+        } else if (item.category === 'reviewImage') {
+            // Ensure we look at all available review images (from persistent store if needed, or allMediaItems)
+            // Using allMediaItems is consistent with what's available to the UI
             currentItems = allMediaItems.filter(i => i.category === 'reviewImage');
-        } else if (mainTab === 'review' && subTab === 'videos') {
+        } else if (item.category === 'reviewVideo') {
             currentItems = allMediaItems.filter(i => i.category === 'reviewVideo');
+        } else {
+            // Fallback to active tab if category is ambiguous (shouldn't happen)
+            return filteredMediaItems.map(i => i.url);
         }
-        // Filter by same media type (image/video) and return URLs
+
         return currentItems.filter(i => i.type === item.type).map(i => i.url);
     };
 
@@ -435,6 +442,12 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     // ============================================
     // Data Loading
     // ============================================
+    // Ref to track current data for comparison in callbacks without dependency cycles
+    const productDataRef = useRef<ProductData | null>(null);
+    useEffect(() => {
+        productDataRef.current = productData;
+    }, [productData]);
+
     const loadData = useCallback(async (triggerScroll: boolean = false) => {
         // Only show full loading spinner for initial load or manual scroll refresh
         // Background updates (triggerScroll=false) should be silent
@@ -448,6 +461,19 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             if (rawData) {
                 // Enrich all variant cards with their specific images in background
                 const enrichedData = enrichProductData(rawData);
+
+                // CHECK: Should we ignore this update? (Background updates only)
+                if (!triggerScroll && productDataRef.current && productDataRef.current.variants) {
+                    const isVariantSwitch = productDataRef.current.variants.some(v => v.asin === enrichedData?.asin);
+                    const isDifferentAsin = productDataRef.current.asin !== enrichedData?.asin;
+
+                    if (isDifferentAsin && isVariantSwitch) {
+                        // Ignore website variant switch to keep panel stable
+                        if (triggerScroll) setLoading(false);
+                        return;
+                    }
+                }
+
                 setProductData(enrichedData);
 
                 if (enrichedData?.activeImage) {
@@ -513,8 +539,10 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     const enrichedNewData = enrichProductData(newData);
 
                     // Detect if product changed (different ASIN or page type)
+                    const isVariantSwitch = productData?.variants?.some(v => v.asin === enrichedNewData?.asin);
+
                     const productChanged = currentAsin && (
-                        enrichedNewData?.asin !== currentAsin ||
+                        (enrichedNewData?.asin !== currentAsin && !isVariantSwitch) ||
                         enrichedNewData?.pageType !== productData?.pageType
                     );
 
@@ -536,8 +564,14 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             setLoading(false);
                         }, 300);
                     } else {
-                        // Same product - silently update data (for variant changes, etc.)
-                        setProductData(enrichedNewData);
+                        // Same product - silently update data...
+                        // UNLESS it's a variant switch on the website, which we want to ignore (keep panel state stable)
+                        if (currentAsin && enrichedNewData?.asin !== currentAsin && isVariantSwitch) {
+                            // User requested: "clicking a variant on website does not make any of the function in the panel"
+                            // So we explicitly IGNORE this update to keep the panel locked to the previous variant.
+                        } else {
+                            setProductData(enrichedNewData);
+                        }
                     }
                 }
             } catch (err: any) {
