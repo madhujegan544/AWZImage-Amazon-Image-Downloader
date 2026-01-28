@@ -463,9 +463,19 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 const enrichedData = enrichProductData(rawData);
 
                 // CHECK: Should we ignore this update? (Background updates only)
-                if (!triggerScroll && productDataRef.current && productDataRef.current.variants) {
-                    const isVariantSwitch = productDataRef.current.variants.some(v => v.asin === enrichedData?.asin);
-                    const isDifferentAsin = productDataRef.current.asin !== enrichedData?.asin;
+                if (!triggerScroll && productDataRef.current) {
+                    const currentData = productDataRef.current;
+                    const newAsin = enrichedData?.asin;
+                    const oldAsin = currentData.asin;
+
+                    const oldVariants = currentData.variants || [];
+                    const newVariants = enrichedData?.variants || [];
+
+                    const isVariantSwitch =
+                        oldVariants.some(v => v.asin === newAsin) ||
+                        newVariants.some(v => v.asin === oldAsin);
+
+                    const isDifferentAsin = oldAsin !== newAsin;
 
                     if (isDifferentAsin && isVariantSwitch) {
                         // Ignore website variant switch to keep panel stable
@@ -718,6 +728,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
         let finalData: ProductData | null = productData;
 
+        // Force enrich data if on product images tab to ensure high-qual images
         if (isProductPage && mainTab === 'product' && subTab === 'images') {
             try {
                 await new Promise<void>(resolve => {
@@ -738,6 +749,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         let items: (string | { url: string; filename: string })[] = [];
         let categoryLabel = `${mainTab}-${subTab}`;
 
+        // Determines if we should create a structured ZIP with folders for each variant
         const shouldGroupVariants = isProductPage && mainTab === 'product' && subTab === 'images' && finalData?.variants;
 
         if (shouldGroupVariants && finalData) {
@@ -746,13 +758,29 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 const vVideos = variant.videos || [];
                 if (vImages.length === 0 && vVideos.length === 0) return;
 
-                const safeName = variant.name.replace(/[^a-zA-Z0-9_-]/g, '_');
+                const safeName = variant.name.replace(/[^a-zA-Z0-9_-]/g, '_').replace(/_+/g, '_');
+
                 vImages.forEach((url, i) => {
-                    let ext = url.includes('.png') ? 'png' : url.includes('.webp') ? 'webp' : 'jpg';
+                    let ext = 'jpg';
+                    const parts = url.split('.');
+                    if (parts.length > 1) {
+                        const potentialExt = parts[parts.length - 1].split('?')[0].toLowerCase();
+                        if (['png', 'webp', 'jpeg', 'gif'].includes(potentialExt)) {
+                            ext = potentialExt;
+                        }
+                    }
                     items.push({ url, filename: `Variant_${safeName}/images/image_${i + 1}.${ext}` });
                 });
+
                 vVideos.forEach((url, i) => {
-                    let ext = url.includes('.webm') ? 'webm' : url.includes('.m3u8') ? 'm3u8' : 'mp4';
+                    let ext = 'mp4';
+                    const parts = url.split('.');
+                    if (parts.length > 1) {
+                        const potentialExt = parts[parts.length - 1].split('?')[0].toLowerCase();
+                        if (['webm', 'm3u8', 'mov'].includes(potentialExt)) {
+                            ext = potentialExt;
+                        }
+                    }
                     items.push({ url, filename: `Variant_${safeName}/videos/video_${i + 1}.${ext}` });
                 });
             });
@@ -760,6 +788,14 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             const targetType = subTab === 'images' ? 'image' : 'video';
             allMediaItems.filter(i => i.source === 'review' && i.type === targetType).forEach((item, i) => {
                 let ext = targetType === 'video' ? 'mp4' : 'jpg';
+                if (targetType === 'video') {
+                    // specific video extension check
+                    const parts = item.url.split('.');
+                    if (parts.length > 1) {
+                        const potentialExt = parts[parts.length - 1].split('?')[0].toLowerCase();
+                        if (['webm', 'm3u8', 'mov'].includes(potentialExt)) ext = potentialExt;
+                    }
+                }
                 items.push({ url: item.url, filename: `Reviews/${subTab}/${item.type}_${i + 1}.${ext}` });
             });
         } else {
@@ -809,71 +845,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         }
     };
 
-    const downloadAllVariants = async () => {
-        if (allVariants.length === 0) return;
 
-        setDownloading(true);
-        setDownloadSuccess(false);
-        setVariantDropdownOpen(false);
-
-        try {
-            // Iterate through each variant and create a separate ZIP
-            for (const variant of allVariants) {
-                const vImages = variant.images || [];
-                const vVideos = variant.videos || [];
-
-                // Skip variants with no media
-                if (vImages.length === 0 && vVideos.length === 0) continue;
-
-                const items: (string | { url: string; filename: string })[] = [];
-
-                // Add Images
-                vImages.forEach((url, i) => {
-                    let ext = 'jpg';
-                    const parts = url.split('.');
-                    if (parts.length > 1) {
-                        const potentialExt = parts[parts.length - 1].split('?')[0].toLowerCase();
-                        if (['png', 'webp', 'jpeg', 'gif'].includes(potentialExt)) {
-                            ext = potentialExt;
-                        }
-                    }
-                    items.push({ url, filename: `image_${i + 1}.${ext}` });
-                });
-
-                // Add Videos
-                vVideos.forEach((url, i) => {
-                    let ext = 'mp4';
-                    const parts = url.split('.');
-                    if (parts.length > 1) {
-                        const potentialExt = parts[parts.length - 1].split('?')[0].toLowerCase();
-                        if (['webm', 'm3u8', 'mov'].includes(potentialExt)) {
-                            ext = potentialExt;
-                        }
-                    }
-                    items.push({ url, filename: `video_${i + 1}.${ext}` });
-                });
-
-                // Generate a safe filename for the ZIP
-                // Format: pixora-{ASIN}-{VariantName}.zip
-                const safeName = variant.name.replace(/[^a-zA-Z0-9_-]/g, '_').replace(/_+/g, '_');
-                const shortSafeName = safeName.length > 50 ? safeName.substring(0, 50) : safeName;
-                const filename = `pixora-${variant.asin}-${shortSafeName}`;
-
-                // Trigger download for this variant
-                await downloadZip(items, filename);
-
-                // Small delay to prevent browser from blocking multiple downloads or choking
-                await new Promise(r => setTimeout(r, 800));
-            }
-
-            setDownloadSuccess(true);
-            setTimeout(() => setDownloadSuccess(false), 3000);
-        } catch (err) {
-            console.error('Download all variants failed:', err);
-        } finally {
-            setTimeout(() => setDownloading(false), 500);
-        }
-    };
 
     // ============================================
     // Selection Functions
@@ -919,15 +891,14 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
         // Reset variant state completely
         setSelectedVariantAsin(null);
-        setSelectedVariantAsin(null);
         setVariantImagesCache({}); // Clear cached images on refresh
         setPersistentReviews([]); // Clear persistent reviews on refresh
         setVariantDropdownOpen(false);
         setSelectingVariant(false);
         setVariantStartIndex(0);
 
-        // Reload data
-        loadData();
+        // Reload data WITH loading state (force scroll/visual feedback)
+        loadData(true);
     };
 
     // ============================================
@@ -965,11 +936,11 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 )}
 
                 {/* Badges */}
-                <div style={{ position: 'absolute', top: '8px', left: '8px', display: 'flex', gap: '4px', pointerEvents: 'none' }}>
+                <div style={{ position: 'absolute', top: '6px', left: '6px', display: 'flex', gap: '4px', pointerEvents: 'none' }}>
                     {isVideo && (
                         <span style={{
-                            background: 'rgba(0, 0, 0, 0.5)', backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)',
-                            color: '#fff', fontSize: '9px', fontWeight: 800, padding: '3px 8px', borderRadius: '6px'
+                            background: 'rgba(0, 0, 0, 0.6)', backdropFilter: 'blur(4px)',
+                            color: '#fff', fontSize: '9px', fontWeight: 800, padding: '2px 6px', borderRadius: '4px'
                         }}>VIDEO</span>
                     )}
                 </div>
@@ -978,16 +949,18 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 <div
                     onClick={(e) => toggleSelection(item.url, e)}
                     style={{
-                        position: 'absolute', top: '8px', right: '8px', width: '24px', height: '24px',
-                        borderRadius: '50%', background: isSelected ? COLORS.primary : 'rgba(255,255,255,0.8)',
-                        backdropFilter: 'blur(4px)', border: isSelected ? 'none' : `1.5px solid rgba(0,0,0,0.1)`,
+                        position: 'absolute', top: '6px', right: '6px', width: '22px', height: '22px',
+                        borderRadius: '50%', background: isSelected ? COLORS.primary : 'rgba(255,255,255,0.9)',
+                        border: isSelected ? 'none' : `1.5px solid rgba(0,0,0,0.1)`,
                         display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        boxShadow: isSelected ? COLORS.shadowMd : COLORS.shadowSm, transition: 'all 0.2s',
-                        zIndex: 10
+                        boxShadow: isSelected ? COLORS.shadowMd : '0 1px 2px rgba(0,0,0,0.1)',
+                        transition: 'all 0.2s',
+                        zIndex: 10,
+                        cursor: 'pointer'
                     }}
                 >
                     {isSelected && (
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
                     )}
                 </div>
 
@@ -996,22 +969,28 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     className="media-hover-overlay"
                     style={{
                         position: 'absolute', inset: 0,
-                        background: 'linear-gradient(to top, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0.2) 50%, transparent 100%)',
-                        opacity: 0, transition: 'opacity 0.2s ease', display: 'flex',
-                        flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end',
-                        padding: '12px', gap: '8px'
+                        background: 'rgba(0,0,0,0.05)',
+                        opacity: 0, transition: 'opacity 0.2s ease',
+                        display: 'flex', alignItems: 'flex-end', justifyContent: 'flex-end',
+                        padding: '6px', pointerEvents: 'none'
                     }}
                 >
                     <button
                         onClick={(e) => { e.stopPropagation(); downloadSingle(item.url); }}
+                        title="Download"
                         style={{
-                            padding: '6px 12px', background: '#fff', borderRadius: '8px',
-                            fontSize: '11px', fontWeight: 700, color: COLORS.text, border: 'none',
-                            boxShadow: COLORS.shadowMd, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px'
+                            width: '28px', height: '28px',
+                            background: '#fff', borderRadius: '8px',
+                            color: COLORS.text, border: 'none',
+                            boxShadow: '0 2px 8px rgba(0,0,0,0.1)', cursor: 'pointer',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            pointerEvents: 'auto',
+                            transition: 'all 0.2s'
                         }}
+                        onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = '0 2px 8px rgba(0,0,0,0.1)'; }}
                     >
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-                        Save
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
                     </button>
                 </div>
             </div>
@@ -1331,7 +1310,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                     <polyline points="7 10 12 15 17 10" />
                                     <line x1="12" y1="15" x2="12" y2="3" />
                                 </svg>
-                                Save
+                                Download
                             </button>
                         )}
 
@@ -1422,7 +1401,11 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 boxSizing: 'border-box'
             }}>
                 {allVariants.map((variant) => {
-                    const isCurrent = selectedVariantAsin === variant.asin;
+                    // Fix: Check manual selection first, then fallback to data selection
+                    const isCurrent = selectedVariantAsin
+                        ? selectedVariantAsin === variant.asin
+                        : variant.selected;
+
                     const imageCount = variant.images?.length || 0;
                     const videoCount = variant.videos?.length || 0;
                     const totalCount = imageCount + videoCount;
@@ -1658,23 +1641,15 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             {!loading && isListingPage && (
                 <div style={{ padding: '8px 12px', background: COLORS.surface, borderBottom: `1px solid ${COLORS.borderLight}`, display: 'flex', gap: '8px', alignItems: 'center' }}>
                     <div style={{ position: 'relative', flex: 1 }}>
-                        <div style={{
-                            position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)',
-                            pointerEvents: 'none', color: COLORS.textMuted
-                        }}>
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
-                            </svg>
-                        </div>
                         <input
                             type="text"
-                            placeholder="Search by product name or ASIN..."
+                            placeholder="Search by name or ASIN..."
                             value={searchTerm}
                             onChange={(e) => setSearchTerm(e.target.value)}
                             onKeyDown={(e) => e.key === 'Enter' && setActiveSearchTerm(searchTerm)}
                             style={{
                                 width: '100%',
-                                padding: '8px 32px 8px 32px',
+                                padding: '8px 60px 8px 12px',
                                 background: COLORS.background,
                                 border: `1px solid ${COLORS.border}`,
                                 borderRadius: '8px',
@@ -1689,15 +1664,33 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             <button
                                 onClick={() => { setSearchTerm(''); setActiveSearchTerm(''); }}
                                 style={{
-                                    position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)',
-                                    background: 'none', border: 'none', color: COLORS.textMuted, cursor: 'pointer', padding: '4px'
+                                    position: 'absolute', right: '36px', top: '50%', transform: 'translateY(-50%)',
+                                    background: 'none', border: 'none', color: COLORS.textMuted, cursor: 'pointer', padding: '4px',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center'
                                 }}
+                                title="Clear search"
                             >
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                                     <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
                                 </svg>
                             </button>
                         )}
+                        <button
+                            onClick={() => setActiveSearchTerm(searchTerm)}
+                            style={{
+                                position: 'absolute', right: '6px', top: '50%', transform: 'translateY(-50%)',
+                                background: COLORS.primarySoft, border: 'none',
+                                color: COLORS.primary, cursor: 'pointer', padding: '5px',
+                                borderRadius: '6px',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                transition: 'all 0.2s'
+                            }}
+                            title="Search"
+                        >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+                            </svg>
+                        </button>
                     </div>
 
                     <button
@@ -1942,7 +1935,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                     <button
-                                        onClick={downloadAllVariants}
+                                        onClick={downloadAll}
                                         disabled={downloading}
                                         style={{
                                             padding: '8px 16px',
