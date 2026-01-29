@@ -388,25 +388,130 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     // URLs for preview navigation (based on item category)
     const getPreviewUrls = (item: MediaItem): string[] => {
         // Fix: Use the item's OWN category to determine the preview context.
-        // This allows clicking review images in the Quick Bar (while on Product tab) to works correctly.
-        let currentItems: typeof allMediaItems = [];
+        let currentItems: MediaItem[] = [];
 
         if (item.category === 'productImage') {
             currentItems = allMediaItems.filter(i => i.category === 'productImage');
         } else if (item.category === 'productVideo') {
             currentItems = allMediaItems.filter(i => i.category === 'productVideo');
         } else if (item.category === 'reviewImage') {
-            // Ensure we look at all available review images (from persistent store if needed, or allMediaItems)
-            // Using allMediaItems is consistent with what's available to the UI
-            currentItems = allMediaItems.filter(i => i.category === 'reviewImage');
+            // Use persistentReviews if available to ensure we have the full set
+            currentItems = persistentReviews.length > 0
+                ? persistentReviews.filter(i => i.category === 'reviewImage')
+                : allMediaItems.filter(i => i.category === 'reviewImage');
         } else if (item.category === 'reviewVideo') {
-            currentItems = allMediaItems.filter(i => i.category === 'reviewVideo');
+            currentItems = persistentReviews.length > 0
+                ? persistentReviews.filter(i => i.category === 'reviewVideo')
+                : allMediaItems.filter(i => i.category === 'reviewVideo');
         } else {
-            // Fallback to active tab if category is ambiguous (shouldn't happen)
             return filteredMediaItems.map(i => i.url);
         }
 
-        return currentItems.filter(i => i.type === item.type).map(i => i.url);
+        // Ensure the clicked item is included if not found (edge case)
+        const urls = currentItems.filter(i => i.type === item.type).map(i => i.url);
+        if (!urls.includes(item.url)) {
+            urls.unshift(item.url);
+        }
+        return urls;
+    };
+
+    // Media Item
+    const renderMediaItem = (item: MediaItem, index: number) => {
+        const isSelected = selectedItems.has(item.url);
+        const isVideo = item.type === 'video';
+
+        return (
+            <div
+                key={`${item.url}-${index}`}
+                onClick={() => handlePreview(item)}
+                title="Click to preview"
+                style={{
+                    position: 'relative',
+                    aspectRatio: '1',
+                    borderRadius: '12px', // Slightly sharper for 'MNC' look
+                    overflow: 'hidden',
+                    background: COLORS.backgroundSecondary,
+                    cursor: 'pointer',
+                    border: `2px solid ${isSelected ? COLORS.primary : 'transparent'}`,
+                    boxShadow: isSelected ? COLORS.shadowPrimary : '0 1px 3px rgba(0,0,0,0.05)', // Subtle shadow
+                    transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+                    boxSizing: 'border-box'
+                }}
+                className="media-item"
+            >
+                {isVideo ? (
+                    <video src={item.url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} muted playsInline />
+                ) : (
+                    <img src={item.url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" />
+                )}
+
+                {/* Badges */}
+                <div style={{ position: 'absolute', top: '6px', left: '6px', display: 'flex', gap: '4px', pointerEvents: 'none' }}>
+                    {isVideo && (
+                        <span style={{
+                            background: 'rgba(0, 0, 0, 0.6)', backdropFilter: 'blur(4px)',
+                            color: '#fff', fontSize: '9px', fontWeight: 800, padding: '2px 6px', borderRadius: '4px'
+                        }}>VIDEO</span>
+                    )}
+                </div>
+
+                {/* Selection Checkbox - Refined */}
+                <div
+                    onClick={(e) => toggleSelection(item.url, e)}
+                    style={{
+                        position: 'absolute', top: '8px', right: '8px', width: '20px', height: '20px',
+                        borderRadius: '50%', background: isSelected ? COLORS.primary : 'rgba(255,255,255,0.85)',
+                        border: isSelected ? 'none' : `1px solid rgba(0,0,0,0.1)`,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        boxShadow: isSelected ? COLORS.shadowMd : '0 2px 4px rgba(0,0,0,0.1)',
+                        transition: 'all 0.2s',
+                        zIndex: 10,
+                        cursor: 'pointer',
+                        opacity: isSelected ? 1 : 0.6 // Fade out when not selected for cleaner look
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.opacity = '1'}
+                    onMouseLeave={e => !isSelected && (e.currentTarget.style.opacity = '0.6')}
+                >
+                    {isSelected && (
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
+                    )}
+                </div>
+
+                {/* Hover Overlay - Simplified Download Button */}
+                <div
+                    className="media-hover-overlay"
+                    style={{
+                        position: 'absolute', inset: 0,
+                        background: 'rgba(0,0,0,0.02)', // Very subtle overlay
+                        opacity: 0, transition: 'opacity 0.2s ease',
+                        display: 'flex', alignItems: 'flex-end', justifyContent: 'flex-end',
+                        padding: '8px', pointerEvents: 'none'
+                    }}
+                >
+                    <button
+                        onClick={(e) => { e.stopPropagation(); downloadSingle(item.url); }}
+                        title="Download"
+                        style={{
+                            width: '24px', height: '24px', // Smaller
+                            background: 'rgba(255,255,255,0.95)',
+                            backdropFilter: 'blur(4px)',
+                            borderRadius: '6px',
+                            color: COLORS.text, border: 'none',
+                            boxShadow: '0 2px 6px rgba(0,0,0,0.1)',
+                            cursor: 'pointer',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            pointerEvents: 'auto',
+                            transition: 'all 0.2s',
+                            opacity: 0.9
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.transform = 'scale(1.1)'; e.currentTarget.style.opacity = '1'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.transform = 'scale(1)'; e.currentTarget.style.opacity = '0.9'; }}
+                    >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+                    </button>
+                </div>
+            </div>
+        );
     };
 
     // Category counts
@@ -905,97 +1010,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     // render functions
     // ============================================
 
-    // Media Item
-    const renderMediaItem = (item: MediaItem, index: number) => {
-        const isSelected = selectedItems.has(item.url);
-        const isVideo = item.type === 'video';
 
-        return (
-            <div
-                key={`${item.url}-${index}`}
-                onClick={() => handlePreview(item)}
-                title="Click to preview"
-                style={{
-                    position: 'relative',
-                    aspectRatio: '1',
-                    borderRadius: '16px',
-                    overflow: 'hidden',
-                    background: COLORS.backgroundSecondary,
-                    cursor: 'pointer',
-                    border: `2px solid ${isSelected ? COLORS.primary : 'transparent'}`,
-                    boxShadow: isSelected ? COLORS.shadowPrimary : COLORS.shadowSm,
-                    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                    boxSizing: 'border-box'
-                }}
-                className="media-item"
-            >
-                {isVideo ? (
-                    <video src={item.url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} muted playsInline />
-                ) : (
-                    <img src={item.url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" />
-                )}
-
-                {/* Badges */}
-                <div style={{ position: 'absolute', top: '6px', left: '6px', display: 'flex', gap: '4px', pointerEvents: 'none' }}>
-                    {isVideo && (
-                        <span style={{
-                            background: 'rgba(0, 0, 0, 0.6)', backdropFilter: 'blur(4px)',
-                            color: '#fff', fontSize: '9px', fontWeight: 800, padding: '2px 6px', borderRadius: '4px'
-                        }}>VIDEO</span>
-                    )}
-                </div>
-
-                {/* Selection Checkbox */}
-                <div
-                    onClick={(e) => toggleSelection(item.url, e)}
-                    style={{
-                        position: 'absolute', top: '6px', right: '6px', width: '22px', height: '22px',
-                        borderRadius: '50%', background: isSelected ? COLORS.primary : 'rgba(255,255,255,0.9)',
-                        border: isSelected ? 'none' : `1.5px solid rgba(0,0,0,0.1)`,
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        boxShadow: isSelected ? COLORS.shadowMd : '0 1px 2px rgba(0,0,0,0.1)',
-                        transition: 'all 0.2s',
-                        zIndex: 10,
-                        cursor: 'pointer'
-                    }}
-                >
-                    {isSelected && (
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
-                    )}
-                </div>
-
-                {/* Hover Overlay */}
-                <div
-                    className="media-hover-overlay"
-                    style={{
-                        position: 'absolute', inset: 0,
-                        background: 'rgba(0,0,0,0.05)',
-                        opacity: 0, transition: 'opacity 0.2s ease',
-                        display: 'flex', alignItems: 'flex-end', justifyContent: 'flex-end',
-                        padding: '6px', pointerEvents: 'none'
-                    }}
-                >
-                    <button
-                        onClick={(e) => { e.stopPropagation(); downloadSingle(item.url); }}
-                        title="Download"
-                        style={{
-                            width: '28px', height: '28px',
-                            background: '#fff', borderRadius: '8px',
-                            color: COLORS.text, border: 'none',
-                            boxShadow: '0 2px 8px rgba(0,0,0,0.1)', cursor: 'pointer',
-                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            pointerEvents: 'auto',
-                            transition: 'all 0.2s'
-                        }}
-                        onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)'; }}
-                        onMouseLeave={(e) => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = '0 2px 8px rgba(0,0,0,0.1)'; }}
-                    >
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-                    </button>
-                </div>
-            </div>
-        );
-    };
 
     // Listing Product Item
     const renderListingProduct = (product: ListingProduct, index: number) => {
@@ -1237,72 +1252,101 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     };
 
     // Variant List (Grouped Cards)
-    // Review Media Quick Bar - Fixed at the top for easy access
-    const renderReviewQuickBar = () => {
+    // Review Media Quick Bar - PERSISTENT DRAWER (Top Button Activation)
+    const renderReviewDrawer = () => {
         const reviewCount = persistentReviews.length;
-        // Persistent panel logic
         if (!isProductPage) return null;
+        if (!reviewSectionExpanded) return null;
 
         return (
-            <div style={{
-                background: COLORS.surface,
-                borderTop: `1px solid ${COLORS.borderLight}`,
-                boxShadow: '0 -4px 20px rgba(0,0,0,0.05)',
-                zIndex: 100,
-                position: 'relative' // Ensure it stacks correctly
-            }}>
+            <>
+                {/* Backdrop - High quality blur with click-to-close */}
                 <div
-                    onClick={() => {
-                        if (reviewCount > 0) setReviewSectionExpanded(!reviewSectionExpanded);
-                    }}
+                    onClick={() => setReviewSectionExpanded(false)}
                     style={{
+                        position: 'absolute',
+                        inset: 0,
+                        background: 'rgba(0,0,0,0.3)',
+                        backdropFilter: 'blur(4px)',
+                        zIndex: 90,
+                        animation: 'fadeIn 0.25s ease-out'
+                    }}
+                />
+
+                {/* Top-Anchored Dropdown Panel - Refined Premium UI */}
+                <div style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    zIndex: 100,
+                    background: COLORS.surface,
+                    borderBottomLeftRadius: '16px', // Reduced radius
+                    borderBottomRightRadius: '16px',
+                    boxShadow: '0 8px 30px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.04)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    maxHeight: '85vh',
+                    overflow: 'hidden',
+                    animation: 'slideDown 0.3s cubic-bezier(0.2, 0.8, 0.2, 1)'
+                }}>
+                    {/* Header Action Bar - Compact */}
+                    <div style={{
+                        padding: '14px 20px', // Adjusted padding
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'space-between',
-                        padding: '12px 16px',
-                        cursor: reviewCount > 0 ? 'pointer' : 'default',
-                        userSelect: 'none'
-                    }}
-                >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        <div style={{
-                            width: '32px', height: '32px', borderRadius: '8px',
-                            background: COLORS.primarySoft, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            color: COLORS.primary
-                        }}>
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                                <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
-                            </svg>
+                        borderBottom: `1px solid ${COLORS.borderLight}`,
+                        background: COLORS.surface,
+                        zIndex: 2
+                    }}>
+                        {/* Title Section */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <div style={{
+                                width: '32px', height: '32px',
+                                background: COLORS.primaryGlow, // Use subtle glow
+                                borderRadius: '8px',
+                                color: COLORS.primary,
+                                display: 'flex', alignItems: 'center', justifyContent: 'center'
+                            }}>
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                    <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+                                </svg>
+                            </div>
+                            <div>
+                                <h3 style={{ fontSize: '14px', fontWeight: 700, color: COLORS.text, margin: 0, lineHeight: '1.2' }}>Review Media</h3>
+                                <div style={{ fontSize: '11px', color: COLORS.textMuted, marginTop: '1px' }}>
+                                    {reviewCount} items found
+                                </div>
+                            </div>
                         </div>
-                        <div>
-                            <div style={{ fontSize: '13px', fontWeight: 700, color: COLORS.text }}>Review Media</div>
-                            <div style={{ fontSize: '11px', color: COLORS.textMuted }}>{reviewCount > 0 ? `${reviewCount} items available` : 'No reviews found'}</div>
-                        </div>
-                    </div>
 
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                        {reviewCount > 0 && (
+                        {/* Actions */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                             <button
                                 onClick={(e) => {
                                     e.stopPropagation();
                                     const reviewItems = persistentReviews.map(item => item.url);
                                     if (reviewItems.length > 0) {
-                                        const filename = `pixora-${productData?.asin || 'item'}-reviews-${Date.now()}`;
+                                        const filename = `pixora-${productData?.asin || 'reviews'}-${Date.now()}`;
                                         downloadZip(reviewItems, filename);
                                     }
                                 }}
                                 style={{
-                                    padding: '6px 12px',
+                                    height: '28px', // Compact button
+                                    padding: '0 12px',
                                     borderRadius: '6px',
-                                    background: COLORS.surface,
-                                    border: `1px solid ${COLORS.border}`,
-                                    color: COLORS.text,
+                                    background: COLORS.primary,
+                                    border: 'none',
+                                    color: '#fff',
                                     fontSize: '11px',
                                     fontWeight: 600,
                                     cursor: 'pointer',
                                     display: 'flex',
                                     alignItems: 'center',
-                                    gap: '6px'
+                                    gap: '6px',
+                                    boxShadow: COLORS.shadowSm,
+                                    transition: 'background 0.2s'
                                 }}
                             >
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
@@ -1310,59 +1354,126 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                     <polyline points="7 10 12 15 17 10" />
                                     <line x1="12" y1="15" x2="12" y2="3" />
                                 </svg>
-                                Download
+                                Download All
                             </button>
-                        )}
 
-                        {reviewCount > 0 && (
-                            <svg
-                                width="16" height="16" viewBox="0 0 24 24" fill="none"
-                                stroke={COLORS.textSecondary} strokeWidth="2.5"
+                            <button
+                                onClick={() => setReviewSectionExpanded(false)}
                                 style={{
-                                    transform: reviewSectionExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
-                                    transition: 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
+                                    width: '28px', height: '28px', borderRadius: '50%',
+                                    background: 'transparent',
+                                    border: 'none',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    color: COLORS.textMuted,
+                                    cursor: 'pointer',
+                                    transition: 'all 0.2s'
                                 }}
+                                onMouseEnter={e => { e.currentTarget.style.background = COLORS.backgroundSecondary; e.currentTarget.style.color = COLORS.text; }}
+                                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = COLORS.textMuted; }}
                             >
-                                <polyline points="6 9 12 15 18 9" />
-                            </svg>
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Content Area */}
+                    <div style={{
+                        padding: '16px 20px 24px 20px', // More breathing room at bottom
+                        overflowY: 'auto',
+                        flex: 1,
+                        backgroundColor: COLORS.background // Distinct background for content
+                    }}>
+
+                        {/* Segmented Control - Modern & Slim */}
+                        <div style={{
+                            display: 'flex',
+                            padding: '3px',
+                            background: '#E2E8F0', // Slightly darker unified bg
+                            borderRadius: '8px',
+                            marginBottom: '20px',
+                            width: 'fit-content', // Don't stretch full width, cleaner
+                            minWidth: '200px'
+                        }}>
+                            {[
+                                { id: 'images', label: 'Images' },
+                                { id: 'videos', label: 'Videos' }
+                            ].map((type) => {
+                                const isActive = reviewSubTab === type.id;
+                                return (
+                                    <button
+                                        key={type.id}
+                                        onClick={() => setReviewSubTab(type.id as 'images' | 'videos')}
+                                        style={{
+                                            flex: 1,
+                                            padding: '4px 12px',
+                                            borderRadius: '6px',
+                                            border: 'none',
+                                            background: isActive ? '#fff' : 'transparent',
+                                            color: isActive ? COLORS.text : COLORS.textSecondary,
+                                            fontSize: '11px',
+                                            fontWeight: isActive ? 700 : 500,
+                                            cursor: 'pointer',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            gap: '6px',
+                                            boxShadow: isActive ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
+                                            transition: 'all 0.15s ease'
+                                        }}
+                                    >
+                                        {type.label}
+                                        <span style={{
+                                            background: isActive ? COLORS.primary : 'rgba(0,0,0,0.1)',
+                                            color: isActive ? '#fff' : COLORS.textSecondary,
+                                            padding: '1px 5px',
+                                            borderRadius: '4px',
+                                            fontSize: '9px',
+                                            fontWeight: 700,
+                                            minWidth: '14px',
+                                            textAlign: 'center'
+                                        }}>
+                                            {persistentReviews.filter(i => i.type === (type.id === 'images' ? 'image' : 'video')).length}
+                                        </span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+
+                        {/* Media Grid */}
+                        {persistentReviews.filter(i => i.type === (reviewSubTab === 'images' ? 'image' : 'video')).length > 0 ? (
+                            <div style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(4, 1fr)', // Keep 4 cols
+                                gap: '12px', // Increased gap for airiness
+                            }}>
+                                {persistentReviews
+                                    .filter(item => item.type === (reviewSubTab === 'images' ? 'image' : 'video'))
+                                    .map((item, index) => renderMediaItem(item, index))}
+                            </div>
+                        ) : (
+                            <div style={{
+                                display: 'flex',
+                                flexDirection: 'column',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                padding: '60px 0',
+                                color: COLORS.textMuted,
+                                opacity: 0.8
+                            }}>
+                                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ marginBottom: '10px', opacity: 0.4 }}>
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                    <polyline points="17 8 12 3 7 8" />
+                                    <line x1="12" y1="3" x2="12" y2="15" />
+                                </svg>
+                                <div style={{ fontSize: '12px', fontWeight: 500 }}>No {reviewSubTab} available</div>
+                            </div>
                         )}
                     </div>
                 </div>
-
-                {/* Constant "Drawer" content */}
-                <div style={{
-                    height: reviewSectionExpanded ? 'auto' : '0px',
-                    overflow: 'hidden',
-                    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                    background: COLORS.backgroundSecondary
-                }}>
-                    <div style={{ padding: '10px', borderTop: `1px solid ${COLORS.borderLight}` }}>
-                        <div style={{ display: 'flex', gap: '4px', marginBottom: '8px' }}>
-                            {['images', 'videos'].map((type) => (
-                                <button
-                                    key={type}
-                                    onClick={() => setReviewSubTab(type as 'images' | 'videos')}
-                                    style={{
-                                        flex: 1, padding: '5px', borderRadius: '5px', border: 'none',
-                                        background: reviewSubTab === type ? COLORS.primarySoft : COLORS.surface,
-                                        color: reviewSubTab === type ? COLORS.primary : COLORS.textSecondary,
-                                        fontSize: '10px', fontWeight: 600, cursor: 'pointer',
-                                        textTransform: 'uppercase'
-                                    }}
-                                >
-                                    {type}
-                                </button>
-                            ))}
-                        </div>
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '4px' }}>
-                            {persistentReviews
-                                .filter(item => item.type === (reviewSubTab === 'images' ? 'image' : 'video'))
-                                .slice(0, 8)
-                                .map((item, index) => renderMediaItem(item, index))}
-                        </div>
-                    </div>
-                </div>
-            </div>
+            </>
         );
     };
 
@@ -1915,72 +2026,148 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             )}
 
             {/* CONTENT - Reorganized based on two-level navigation */}
-            <main style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <main style={{
+                flex: 1,
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden',
+                position: 'relative' // Essential for absolute positioning of persistent buttons
+            }}>
                 {loading ? renderLoading() : !hasContent ? renderEmpty() : (
                     <>
                         {/* Persistent Variants Header (Only for Product Images Tab) */}
                         {isProductPage && mainTab === 'product' && subTab === 'images' && allVariants.length > 0 && (
                             <div style={{
-                                padding: '8px 12px',
                                 background: COLORS.surface,
                                 borderBottom: `1px solid ${COLORS.borderLight}`,
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'space-between',
                                 flexShrink: 0,
                                 zIndex: 40,
                                 boxShadow: '0 2px 4px rgba(0,0,0,0.02)'
                             }}>
-                                <h3 style={{ fontSize: '14px', fontWeight: 800, color: COLORS.text, margin: 0 }}>Available Variants</h3>
+                                {/* ROW 1: Action Controls */}
+                                <div style={{
+                                    padding: '8px 12px',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    gap: '8px'
+                                }}>
+                                    {/* Review Media Button (Left Aligned) */}
+                                    {persistentReviews.length > 0 && (
+                                        <button
+                                            onClick={() => setReviewSectionExpanded(true)}
+                                            style={{
+                                                padding: '8px 14px',
+                                                borderRadius: '10px',
+                                                background: COLORS.surface, // Clean white background
+                                                color: COLORS.primary, // Brand color text
+                                                border: `1.5px solid ${COLORS.primary}`, // Visible brand border
+                                                fontSize: '11px',
+                                                fontWeight: 700, // Slightly bolder for visibility
+                                                cursor: 'pointer',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: '6px',
+                                                transition: 'all 0.2s cubic-bezier(0.2, 0.8, 0.2, 1)',
+                                                transform: 'scale(1)',
+                                                whiteSpace: 'nowrap',
+                                                flexShrink: 0,
+                                                boxShadow: '0 1px 2px rgba(79, 70, 229, 0.05)' // Very subtle glow
+                                            }}
+                                            onMouseEnter={e => {
+                                                e.currentTarget.style.background = COLORS.primarySoft; // Light blue hover
+                                                e.currentTarget.style.transform = 'translateY(-1px)';
+                                                e.currentTarget.style.boxShadow = '0 4px 6px -1px rgba(79, 70, 229, 0.1)';
+                                            }}
+                                            onMouseLeave={e => {
+                                                e.currentTarget.style.background = COLORS.surface;
+                                                e.currentTarget.style.transform = 'translateY(0) scale(1)';
+                                                e.currentTarget.style.boxShadow = '0 1px 2px rgba(79, 70, 229, 0.05)';
+                                            }}
+                                            onMouseDown={e => e.currentTarget.style.transform = 'scale(0.96)'}
+                                            title="Open Review Media"
+                                        >
+                                            <div style={{
+                                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                color: COLORS.primary,
+                                            }}>
+                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                                    <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+                                                </svg>
+                                            </div>
+                                            <span>Review Media</span>
+                                            <span style={{
+                                                background: COLORS.primary,
+                                                color: '#fff', // Inverted contrast badge
+                                                fontSize: '10px',
+                                                fontWeight: 800,
+                                                padding: '2px 6px',
+                                                borderRadius: '6px',
+                                                marginLeft: '2px'
+                                            }}>{persistentReviews.length}</span>
+                                        </button>
+                                    )}
+                                    {persistentReviews.length === 0 && <div />} {/* Spacer if no reviews */}
 
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                    <button
-                                        onClick={downloadAll}
-                                        disabled={downloading}
-                                        style={{
-                                            padding: '8px 16px',
-                                            background: COLORS.primary,
-                                            color: '#fff',
-                                            borderRadius: '10px',
-                                            fontSize: '12px',
-                                            fontWeight: 700,
-                                            border: 'none',
-                                            cursor: downloading ? 'wait' : 'pointer',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '8px',
-                                            transition: 'all 0.2s',
-                                            opacity: downloading ? 0.8 : 1,
-                                            boxShadow: COLORS.shadowPrimary
-                                        }}
-                                    >
-                                        {downloading ? (
-                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: 'spin 1.5s linear infinite' }}>
-                                                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                                    <div style={{ display: 'flex', gap: '8px', marginLeft: 'auto' }}>
+                                        <button
+                                            onClick={downloadAll}
+                                            disabled={downloading}
+                                            style={{
+                                                padding: '8px 16px',
+                                                background: COLORS.primary,
+                                                color: '#fff',
+                                                borderRadius: '10px',
+                                                fontSize: '12px',
+                                                fontWeight: 700,
+                                                border: 'none',
+                                                cursor: downloading ? 'wait' : 'pointer',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: '8px',
+                                                transition: 'all 0.2s',
+                                                opacity: downloading ? 0.8 : 1,
+                                                boxShadow: COLORS.shadowPrimary,
+                                                whiteSpace: 'nowrap', // Prevent wrapping
+                                                flexShrink: 0
+                                            }}
+                                        >
+                                            {downloading ? (
+                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: 'spin 1.5s linear infinite' }}>
+                                                    <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                                                </svg>
+                                            ) : (
+                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+                                            )}
+                                            {downloading ? 'Downloading...' : `Download All (${allVariants.length})`}
+                                        </button>
+
+                                        <button
+                                            onClick={handleRefresh}
+                                            style={{
+                                                width: '28px', height: '28px', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                background: COLORS.backgroundSecondary, borderRadius: '8px', color: COLORS.textSecondary,
+                                                border: 'none', cursor: 'pointer', transition: 'all 0.2s'
+                                            }}
+                                            title="Refresh Data"
+                                        >
+                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: loading ? 'spin 1.5s linear infinite' : 'none' }}>
+                                                <path d="M23 4v6h-6M1 20v-6h6" />
+                                                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
                                             </svg>
-                                        ) : (
-                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-                                        )}
-                                        {downloading ? 'Downloading...' : `Download All (${allVariants.length})`}
-                                    </button>
+                                        </button>
+                                    </div>
+                                </div>
 
-                                    <button
-                                        onClick={handleRefresh}
-                                        style={{
-                                            width: '28px', height: '28px', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                            background: COLORS.backgroundSecondary, borderRadius: '8px', color: COLORS.textSecondary,
-                                            border: 'none', cursor: 'pointer', transition: 'all 0.2s'
-                                        }}
-                                        title="Refresh Data"
-                                    >
-                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: loading ? 'spin 1.5s linear infinite' : 'none' }}>
-                                            <path d="M23 4v6h-6M1 20v-6h6" />
-                                            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-                                        </svg>
-                                    </button>
+                                {/* ROW 2: Title Label */}
+                                <div style={{ padding: '4px 12px 10px 12px' }}>
+                                    <h3 style={{ fontSize: '14px', fontWeight: 800, color: COLORS.text, margin: 0 }}>Available Variants</h3>
                                 </div>
                             </div>
                         )}
+
+                        {/* Drawer content - Updated to Top-Anchored Dropdown */}
+                        {renderReviewDrawer()}
 
                         <div className="scroll-container" style={{
                             flex: 1,
@@ -2028,7 +2215,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             )}
                         </div>
 
-                        {renderReviewQuickBar()}
+
                     </>
                 )}
             </main>
@@ -2105,6 +2292,9 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 @keyframes fadeInScale { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
                 @keyframes shimmer { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
                 @keyframes checkBounce { 0% { transform: scale(0.8); } 50% { transform: scale(1.1); } 100% { transform: scale(1.0); } }
+                @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+                @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+                @keyframes slideDown { from { transform: translateY(-100%); } to { transform: translateY(0); } }
             `}</style>
         </div >
     );
