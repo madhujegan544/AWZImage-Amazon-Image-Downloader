@@ -819,15 +819,40 @@ export default defineContentScript({
                 'explore-brand', 'aplus-module', 'enhanced-brand', 'third-party', 'external-video',
                 'similarities', 'comparison-widget', 'also-viewed', 'frequently-bought',
                 'shoppable-video', 'influencer', 'amazon-influence', 'curated', 'bought-together',
-                'lookbook', 'discovery-video', 'related-video', 'expert-review', 'amazon-live',
-                'live-stream', 'videos-for-this-product', 'vss_public', 'shoppable-media',
+                'lookbook', 'discovery-video', 'expert-review', 'amazon-live',
+                'live-stream', 'vss_public', 'shoppable-media',
                 'product-discovery', 'shoppable-content', 'related-products-video'
             ];
             return patterns.some(p => lowerContent.includes(p) || lowerUrl.includes(p));
         }
 
         function isOfficialProductVideo(content: string, url: string): boolean {
-            if (isPromotionalContent(content, url)) return false;
+            // 1. Locate the video URL in the content to establish a localized context.
+            // Critical for handling large scripts (ImageBlockATF) that might also contain unrelated "brand" or "sponsored" data elsewhere.
+            let urlIndex = content.indexOf(url);
+            if (urlIndex === -1 && url.includes('/')) {
+                // Try common JSON escape patterns if direct match fails
+                urlIndex = content.indexOf(url.replace(/\//g, '\\u002F'));
+            }
+            if (urlIndex === -1 && url.includes('/')) {
+                urlIndex = content.indexOf(url.replace(/\//g, '\\/'));
+            }
+
+            // 2. Define Context Window (prevent scanning massive strings for generic keywords)
+            let context = content;
+            if (urlIndex >= 0) {
+                // 1000 char window should be enough to capture container names like 'ImageBlockATF'
+                context = content.substring(Math.max(0, urlIndex - 1000), Math.min(content.length, urlIndex + 1000));
+            } else if (content.length > 5000) {
+                // If URL not found and content is huge, we cannot safely rely on context checks.
+                // We'll process it, but note that positive context matching will likely fail.
+                // We truncate to avoid performance hits on massive regex checks.
+                context = content.substring(0, 5000);
+            }
+
+            // 3. Check for Promotional/Exclusion markers in the LOCALIZED context
+            if (isPromotionalContent(context, url)) return false;
+
             const lowerUrl = url.toLowerCase();
             const exclude = ['brand', 'sponsor', 'advertisement', 'promo', 'similar', 'compare', 'thirdparty', 'external'];
             if (exclude.some(p => lowerUrl.includes(p))) return false;
@@ -835,17 +860,28 @@ export default defineContentScript({
             const official = [
                 'product-video', 'product_video', 'main-video', 'gallery-video', 'detail-video',
                 'dp-video', 'landing-video', 'primary-video', 'image-block', 'alt-images',
-                'iv-main', 'color-images', 'vse-video'
+                'iv-main', 'color-images', 'vse-video', 'imageblockatf', 'initial-video'
             ];
 
-            const urlIndex = content.indexOf(url);
+            const lowerContext = context.toLowerCase();
+
+            // 4. Positive Context Matching
+            // If we found the URL in the content, check the surroundings
             if (urlIndex >= 0) {
-                const context = content.substring(Math.max(0, urlIndex - 600), Math.min(content.length, urlIndex + 600)).toLowerCase();
-                if (official.some(p => context.includes(p))) return true;
-                const suspicious = ['brand', 'story', 'similar', 'compare', 'related', 'also', 'other', 'sponsor', 'ad', 'recom', 'suggest', 'bought'];
-                if (suspicious.some(p => context.includes(p))) return false;
+                if (official.some(p => lowerContext.includes(p))) {
+                    // Strong signals like ImageBlockATF/colorImages override weaker suspicious signals
+                    if (lowerContext.includes('imageblockatf') || lowerContext.includes('colorimages') || lowerContext.includes('image-block')) {
+                        return true;
+                    }
+
+                    const suspicious = ['brand', 'story', 'similar', 'compare', 'related', 'also', 'other', 'sponsor', 'ad', 'recom', 'suggest', 'bought'];
+                    if (suspicious.some(p => lowerContext.includes(p))) return false;
+
+                    return true;
+                }
             }
-            // Strict pattern for official URLs
+
+            // 5. Strict URL Patterns (Fallback if context match failed)
             const strictOfficialPatterns = ['product-video', 'official-video', 'iv-main', 'vse-video', 'vse_video'];
             if (strictOfficialPatterns.some(p => lowerUrl.includes(p))) return true;
 
@@ -861,15 +897,32 @@ export default defineContentScript({
         }
 
         function isReviewVideoContext(content: string, url: string): boolean {
-            const lowerContent = content.toLowerCase();
+            // 1. Locate URL/Context
+            let urlIndex = content.indexOf(url);
+            if (urlIndex === -1 && url.includes('/')) {
+                urlIndex = content.indexOf(url.replace(/\//g, '\\u002F'));
+            }
+            if (urlIndex === -1 && url.includes('/')) {
+                urlIndex = content.indexOf(url.replace(/\//g, '\\/'));
+            }
+
+            let context = content;
+            if (urlIndex >= 0) {
+                // Extracts surrounding text
+                context = content.substring(Math.max(0, urlIndex - 800), Math.min(content.length, urlIndex + 800));
+            } else if (content.length > 5000) {
+                context = content.substring(0, 5000); // Truncate for safey
+            }
+
+            const lowerContext = context.toLowerCase();
             const lowerUrl = url.toLowerCase();
 
-            // First, exclude if it's promotional/competitor content
-            if (isPromotionalContent(content, url)) {
+            // 2. Promotional Check on LOCALIZED context
+            if (isPromotionalContent(context, url)) {
                 return false;
             }
 
-            // COMPREHENSIVE URL patterns that indicate customer review videos
+            // 3. URL Pattern Check
             const reviewUrlPatterns = [
                 'customer-review', 'customerreview', 'customer_review', 'review-video',
                 'reviewvideo', 'review_video', 'ugc-video', 'ugcvideo', 'ugc_video',
@@ -882,14 +935,8 @@ export default defineContentScript({
                 return true;
             }
 
-            // Check context around the URL for review markers
-            const urlIndex = content.indexOf(url);
-            if (urlIndex > 0) {
-                const context = content.substring(
-                    Math.max(0, urlIndex - 600),
-                    Math.min(content.length, urlIndex + 600)
-                ).toLowerCase();
-
+            // 4. Context Pattern Check
+            if (urlIndex >= 0) {
                 // Context patterns that indicate customer review video
                 const reviewContextPatterns = [
                     'customerreview', 'customer-review', 'customer_review', 'reviewvideo',
@@ -900,20 +947,22 @@ export default defineContentScript({
                     'reviewmedia', 'review-media', 'perfect', 'shade', 'quality',
                     'texture', 'scent', 'size', 'fit', 'color', 'verified', 'purchase',
                     'reviewer', 'stars', '"mediatype":"video"', '"type":"review"',
-                    '"reviewid"', 'cm_cr_review', 'customer review', 'helpful'
+                    '"reviewid"', 'cm_cr_review', 'customer review', 'helpful',
+                    // Added more specific review JSON keys
+                    'reviewvideo', 'customervideo', 'videolist'
                 ];
 
-                const hasReviewContext = reviewContextPatterns.some(pattern => context.includes(pattern));
+                const hasReviewContext = reviewContextPatterns.some(pattern => lowerContext.includes(pattern));
 
                 // MUST NOT have product/gallery video context
                 const productVideoContextPatterns = [
                     'productvideo', 'product-video', 'product_video', 'galleryvideo',
                     'gallery-video', 'gallery_video', 'mainvideo', 'main-video',
                     'main_video', 'imageblock', 'image-block', 'altimages', 'alt-images',
-                    'colorimages', 'color-images', 'ivmain', 'iv-main'
+                    'colorimages', 'color-images', 'ivmain', 'iv-main', 'imageblockatf'
                 ];
 
-                const hasProductVideoContext = productVideoContextPatterns.some(pattern => context.includes(pattern));
+                const hasProductVideoContext = productVideoContextPatterns.some(pattern => lowerContext.includes(pattern));
 
                 if (hasReviewContext && !hasProductVideoContext) {
                     return true;
@@ -1893,11 +1942,27 @@ export default defineContentScript({
                         // Look for any MP4, m3u8, mpd, or webm URLs
                         const vMatch = scriptContent.match(/https?:\/\/[^"'\s,\]\[\}]+\.(mp4|m3u8|mpd|webm)[^"'\s,\]\[\}]*/gi);
                         if (vMatch) {
+                            // Check if this script is a known official gallery container
+                            // If so, we can be more confident that videos inside are product videos (unless explicitly reviews)
+                            const isTrustedGalleryScript = scriptContent.includes('ImageBlockATF') ||
+                                scriptContent.includes('colorImages') ||
+                                (scriptContent.includes('imageGalleryData') && !scriptContent.includes('customerReview'));
+
                             vMatch.forEach(vUrl => {
                                 const cleanUrl = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                if (!isPromotionalContent(scriptContent, cleanUrl)) {
-                                    if (isReviewVideoContext(scriptContent, cleanUrl)) addReviewVideo(cleanUrl);
-                                    else if (isOfficialProductVideo(scriptContent, cleanUrl)) addProductVideo(cleanUrl);
+
+                                // For trusted gallery scripts, avoid false positives from unrelated keywords in the large script block
+                                // Only check the URL itself for promotional markers
+                                const isPromo = isTrustedGalleryScript
+                                    ? isPromotionalContent('', cleanUrl)
+                                    : isPromotionalContent(scriptContent, cleanUrl);
+
+                                if (!isPromo) {
+                                    if (isReviewVideoContext(scriptContent, cleanUrl)) {
+                                        addReviewVideo(cleanUrl);
+                                    } else if (isTrustedGalleryScript || isOfficialProductVideo(scriptContent, cleanUrl)) {
+                                        addProductVideo(cleanUrl);
+                                    }
                                 }
                             });
                         }
@@ -2036,7 +2101,9 @@ export default defineContentScript({
                                             // Categorize accurately
                                             if (isReviewVideoContext(vContext, cleanUrl)) {
                                                 addReviewVideo(cleanUrl);
-                                            } else if (isOfficialProductVideo(vContext, cleanUrl)) {
+                                            } else {
+                                                // TRUST VSE DATA: If it's in the official VSE block and not a review/promo, it's a product video.
+                                                // This captures influencer/related videos that are part of the main carousel.
                                                 addProductVideo(cleanUrl);
                                             }
                                         }
@@ -2123,14 +2190,14 @@ export default defineContentScript({
                                                 if (videoItem.variants && Array.isArray(videoItem.variants)) {
                                                     videoItem.variants.forEach((variant: any) => {
                                                         const vUrl = (variant.url || variant.videoUrl || '').replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                                        if (vUrl && isOfficialProductVideo(JSON.stringify(videoItem), vUrl)) {
+                                                        // Trust videos in the official 'videos' block unless explicitly review/promo
+                                                        if (vUrl) {
                                                             addProductVideo(vUrl);
                                                         }
                                                     });
                                                 }
-                                                if (isOfficialProductVideo(JSON.stringify(videoItem), cleanUrl)) {
-                                                    addProductVideo(cleanUrl);
-                                                }
+                                                // Trust trusted block unless review/promo
+                                                addProductVideo(cleanUrl);
                                             }
                                         }
                                     });
