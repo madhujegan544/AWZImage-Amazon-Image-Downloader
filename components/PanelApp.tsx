@@ -1487,7 +1487,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 asin: productData.asin,
                 name: productData.title,
                 image: productData.productImages?.[0] || '', // Use first image as thumb
-                isAvailable: true,
+                available: true,
+                selected: true,
                 images: productData.productImages || [],
                 videos: productData.videos || []
             }];
@@ -1531,7 +1532,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 background: COLORS.surface,
                                 borderRadius: '12px',
                                 border: isCurrent ? `1.5px solid ${COLORS.primary}` : `1px solid ${COLORS.borderLight}`,
-                                padding: '10px',
+                                padding: '12px',
                                 cursor: selectingVariant ? 'wait' : 'pointer',
                                 transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
                                 boxShadow: isCurrent ? COLORS.shadowPrimary : '0 1px 3px rgba(0,0,0,0.05)',
@@ -1539,13 +1540,13 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 overflow: 'hidden',
                                 display: 'flex',
                                 flexDirection: 'column',
-                                gap: '8px',
+                                gap: '4px',
                                 boxSizing: 'border-box'
                             }}
                         >
-                            <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                            <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
                                 <div style={{
-                                    width: '72px', height: '72px', borderRadius: '8px',
+                                    width: '64px', height: '64px', borderRadius: '8px',
                                     background: `url(${variant.image}) center/contain no-repeat`,
                                     backgroundColor: COLORS.backgroundSecondary, flexShrink: 0,
                                     border: `1px solid ${COLORS.borderLight}`
@@ -1555,14 +1556,14 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }}>
                                         <div style={{ minWidth: 0, flex: 1 }}>
                                             <h4 style={{
-                                                fontSize: '13px', fontWeight: 600, color: COLORS.text,
+                                                fontSize: '13px', fontWeight: 700, color: COLORS.text,
                                                 margin: 0, display: '-webkit-box', WebkitLineClamp: 2,
                                                 WebkitBoxOrient: 'vertical', overflow: 'hidden',
                                                 lineHeight: '1.3'
                                             }}>{variant.name}</h4>
                                             <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '1px' }}>
                                                 <span style={{
-                                                    fontSize: '9px',
+                                                    fontSize: '10px',
                                                     color: COLORS.textMuted,
                                                     fontWeight: 600,
                                                     textTransform: 'uppercase',
@@ -1575,97 +1576,63 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                                 background: COLORS.primary,
                                                 color: '#fff',
                                                 fontSize: '9px',
-                                                fontWeight: 900,
+                                                fontWeight: 800,
                                                 padding: '2px 8px',
                                                 borderRadius: '20px',
                                                 textTransform: 'uppercase',
-                                                letterSpacing: '0.5px',
-                                                boxShadow: '0 2px 6px rgba(79, 70, 229, 0.25)'
+                                                letterSpacing: '0.4px',
+                                                boxShadow: '0 2px 4px rgba(79, 70, 229, 0.2)'
                                             }}>Active</div>
                                         )}
                                     </div>
 
-                                    <div style={{ display: 'flex', gap: '5px', marginTop: '8px', overflowX: 'auto', paddingBottom: '2px' }} className="no-scrollbar">
+                                    {/* Inline Media Strip (Max 5 items) */}
+                                    <div style={{ display: 'flex', gap: '4px', marginTop: '6px' }}>
                                         {(() => {
-                                            const allItems = [
-                                                ...(variant.images || []).map(i => ({ type: 'image', url: i })),
-                                                ...(variant.videos || []).map(v => ({ type: 'video', url: v }))
-                                            ];
-                                            const visibleItems = allItems.slice(0, 5);
-                                            const remainingCount = allItems.length - 5;
+                                            // Combine media: Images first (usually) or Videos first? 
+                                            // Screenshot shows images. Let's do Images then Videos.
+                                            const images = variant.images || [];
+                                            const videos = variant.videos || [];
+                                            const allMedia = [...images.map(u => ({ type: 'img', url: u })), ...videos.map(u => ({ type: 'vid', url: u }))];
+
+                                            const MAX_VISIBLE = 5;
+                                            const hasMore = allMedia.length > MAX_VISIBLE;
+                                            const displayItems = hasMore ? allMedia.slice(0, MAX_VISIBLE - 1) : allMedia;
+                                            const remaining = allMedia.length - displayItems.length;
 
                                             return (
                                                 <>
-                                                    {visibleItems.map((item, i) => (
-                                                        <div
-                                                            key={i}
-                                                            title="Click to preview"
-                                                            onClick={(e) => {
-                                                                e.stopPropagation();
-                                                                if (showPreview) {
-                                                                    const contextUrls = allItems.map(m => m.url);
-                                                                    showPreview(item.url, item.type as 'image' | 'video', contextUrls);
-                                                                }
-                                                            }}
-                                                            style={{
-                                                                width: '32px',
-                                                                height: '32px',
-                                                                borderRadius: '6px',
-                                                                overflow: 'hidden',
-                                                                position: 'relative',
-                                                                backgroundColor: COLORS.backgroundSecondary,
-                                                                border: `1px solid ${COLORS.borderLight}`,
-                                                                flexShrink: 0,
-                                                                display: 'flex',
-                                                                alignItems: 'center',
-                                                                justifyContent: 'center',
-                                                                cursor: 'zoom-in'
-                                                            }}>
-                                                            {item.type === 'video' ? (
-                                                                <>
-                                                                    <video src={item.url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                                                                    <div style={{
-                                                                        position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.3)',
-                                                                        display: 'flex', alignItems: 'center', justifyContent: 'center'
-                                                                    }}>
-                                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="white" stroke="white" strokeWidth="2">
-                                                                            <polygon points="5 3 19 12 5 21 5 3" />
-                                                                        </svg>
-                                                                    </div>
-                                                                </>
-                                                            ) : (
-                                                                <img src={item.url} style={{ width: '100%', height: '100%', objectFit: 'contain' }} loading="lazy" />
+                                                    {displayItems.map((item, idx) => (
+                                                        <div key={`${item.type}-${idx}`} style={{
+                                                            width: '28px', height: '28px',
+                                                            borderRadius: '4px',
+                                                            background: item.type === 'img'
+                                                                ? `url(${item.url}) center/cover no-repeat`
+                                                                : '#333',
+                                                            backgroundColor: COLORS.backgroundSecondary,
+                                                            border: `1px solid ${COLORS.borderLight}`,
+                                                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                            position: 'relative'
+                                                        }}>
+                                                            {item.type === 'vid' && (
+                                                                <svg width="10" height="10" viewBox="0 0 24 24" fill="white" stroke="none">
+                                                                    <path d="M8 5v14l11-7z" />
+                                                                </svg>
                                                             )}
                                                         </div>
                                                     ))}
-                                                    {remainingCount > 0 && (
-                                                        <div
-                                                            onClick={(e) => {
-                                                                e.stopPropagation();
-                                                                if (showPreview) {
-                                                                    // Show preview starting from the 6th item
-                                                                    const contextUrls = allItems.map(m => m.url);
-                                                                    showPreview(allItems[5].url, allItems[5].type as 'image' | 'video', contextUrls);
-                                                                }
-                                                            }}
-                                                            style={{
-                                                                width: '32px',
-                                                                height: '32px',
-                                                                borderRadius: '6px',
-                                                                backgroundColor: COLORS.surface,
-                                                                border: `1px solid ${COLORS.borderLight}`,
-                                                                flexShrink: 0,
-                                                                display: 'flex',
-                                                                alignItems: 'center',
-                                                                justifyContent: 'center',
-                                                                cursor: 'pointer',
-                                                                fontSize: '10px',
-                                                                fontWeight: 700,
-                                                                color: COLORS.primary,
-                                                                background: COLORS.primarySoft
-                                                            }}
-                                                        >
-                                                            +{remainingCount}
+                                                    {remaining > 0 && (
+                                                        <div style={{
+                                                            width: '28px', height: '28px',
+                                                            borderRadius: '4px',
+                                                            background: '#F1F5F9',
+                                                            border: `1px solid ${COLORS.borderLight}`,
+                                                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                            color: '#64748B',
+                                                            fontSize: '9px',
+                                                            fontWeight: 700
+                                                        }}>
+                                                            +{remaining}
                                                         </div>
                                                     )}
                                                 </>
@@ -1677,16 +1644,23 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
                             <div style={{ marginTop: '0px', paddingTop: '8px', borderTop: `1px solid ${COLORS.borderLight}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                                 <div style={{ display: 'flex', gap: '6px' }}>
-                                    <div style={{ background: COLORS.backgroundSecondary, padding: '3px 10px', borderRadius: '6px' }}>
-                                        <span style={{ fontSize: '10px', fontWeight: 700, color: COLORS.textSecondary, letterSpacing: '0.2px' }}>{imageCount} IMG</span>
+                                    <div style={{
+                                        fontSize: '10px', fontWeight: 700, color: '#64748B',
+                                        background: '#F1F5F9', padding: '4px 8px', borderRadius: '4px',
+                                        letterSpacing: '0.3px', minWidth: '40px', textAlign: 'center'
+                                    }}>
+                                        {imageCount} IMG
                                     </div>
-                                    {videoCount > 0 && (
-                                        <div style={{ background: COLORS.backgroundSecondary, padding: '3px 10px', borderRadius: '6px' }}>
-                                            <span style={{ fontSize: '10px', fontWeight: 700, color: COLORS.textSecondary, letterSpacing: '0.2px' }}>{videoCount} VID</span>
+                                    {(videoCount > 0) && (
+                                        <div style={{
+                                            fontSize: '10px', fontWeight: 700, color: '#64748B',
+                                            background: '#F1F5F9', padding: '4px 8px', borderRadius: '4px',
+                                            letterSpacing: '0.3px', minWidth: '35px', textAlign: 'center'
+                                        }}>
+                                            {videoCount} VID
                                         </div>
                                     )}
                                 </div>
-
                                 <button
                                     onClick={(e) => {
                                         e.stopPropagation();
@@ -1696,19 +1670,33 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                     disabled={selectingVariant}
                                     className="variant-download-btn"
                                     style={{
-                                        padding: '6px 12px',
+                                        padding: '5px 12px',
                                         background: 'transparent',
-                                        border: `1px solid ${COLORS.border}`,
+                                        border: `1px solid ${COLORS.borderLight}`,
                                         borderRadius: '6px',
                                         fontSize: '11px',
                                         fontWeight: 600,
-                                        color: COLORS.textSecondary,
+                                        color: '#475569',
                                         cursor: 'pointer',
                                         display: 'flex',
                                         alignItems: 'center',
                                         gap: '6px',
-                                        boxShadow: '0 2px 6px rgba(0,0,0,0.06)',
-                                        transition: 'all 0.2s ease'
+                                        opacity: selectingVariant ? 0.6 : 1,
+                                        transition: 'all 0.2s',
+                                        height: '28px',
+                                        boxShadow: '0 1px 2px rgba(0,0,0,0.02)'
+                                    }}
+                                    onMouseEnter={e => {
+                                        if (!selectingVariant) {
+                                            e.currentTarget.style.background = '#F8FAFC';
+                                            e.currentTarget.style.borderColor = '#CBD5E1';
+                                            e.currentTarget.style.color = '#334155';
+                                        }
+                                    }}
+                                    onMouseLeave={e => {
+                                        e.currentTarget.style.background = 'transparent';
+                                        e.currentTarget.style.borderColor = COLORS.borderLight;
+                                        e.currentTarget.style.color = '#475569';
                                     }}
                                 >
                                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
@@ -1717,8 +1705,9 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             </div>
                         </div>
                     );
-                })}
-            </div>
+                })
+                }
+            </div >
         );
     };
 

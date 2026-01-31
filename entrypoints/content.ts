@@ -858,11 +858,13 @@ export default defineContentScript({
             const lowerContent = content.toLowerCase();
             const reviewPatterns = [
                 'customer-review', 'customerreview', 'review-video', 'ugc', 'usermedia',
-                'cr-media', 'crwidget', 'review media', 'customer images', 'perfect',
-                'shade', 'quality', 'texture', 'scent', 'size', 'purchase', 'reviewer'
+                'cr-media', 'crwidget', 'review media', 'customer images', 'reviewer',
+                'review_video', 'customer_review', 'reviews-image-gallery'
             ];
+            // REMOVED: generic words like 'perfect','size','quality' which caused false positives
+
             if (reviewPatterns.some(p => lowerContent.includes(p))) {
-                const productPatterns = ['product-video', 'image-block', 'alt-images', 'color-images', 'iv-main'];
+                const productPatterns = ['product-video', 'image-block', 'alt-images', 'color-images', 'iv-main', 'vse-video'];
                 if (!productPatterns.some(p => lowerContent.includes(p))) return true;
             }
             return false;
@@ -878,6 +880,8 @@ export default defineContentScript({
             // No scrolling - keeps user experience smooth
             // Review media is fetched silently via fetchAllReviewMedia
         }
+
+
 
         async function fetchAllReviewMedia(asin: string, limit: number = 100): Promise<{ images: string[], videos: string[] }> {
             const allImages: string[] = [];
@@ -950,9 +954,13 @@ export default defineContentScript({
                                 if (vMatch) {
                                     vMatch.forEach(vUrl => {
                                         const clean = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                        // Ensure it's a review video
-                                        if ((clean.includes('customer') || clean.includes('review') || clean.includes('cr-media'))
-                                            && !clean.includes('vss_public') && !clean.includes('aplus')) {
+                                        // RELAXED: In media_reviews_only mode, assume videos are reviews unless explicitly promotional
+                                        const isPromotional = clean.includes('vss_public') ||
+                                            clean.includes('aplus') ||
+                                            clean.includes('brand') ||
+                                            clean.includes('sponsored');
+
+                                        if (!isPromotional) {
                                             const vid = clean.split('?')[0];
                                             if (!seenVideos.has(vid)) {
                                                 seenVideos.add(vid);
@@ -988,8 +996,13 @@ export default defineContentScript({
                                 if (vMatch) {
                                     vMatch.forEach(vUrl => {
                                         const clean = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                        if ((clean.includes('customer') || clean.includes('review') || clean.includes('cr-media'))
-                                            && !clean.includes('vss_public') && !clean.includes('aplus')) {
+                                        // RELAXED: In media_reviews_only mode, assume videos are reviews unless explicitly promotional
+                                        const isPromotional = clean.includes('vss_public') ||
+                                            clean.includes('aplus') ||
+                                            clean.includes('brand') ||
+                                            clean.includes('sponsored');
+
+                                        if (!isPromotional) {
                                             const vid = clean.split('?')[0];
                                             if (!seenVideos.has(vid)) {
                                                 seenVideos.add(vid);
@@ -1052,13 +1065,18 @@ export default defineContentScript({
             const targets = variants.filter(v => {
                 const isVisited = visitedAsins.has(v.asin);
                 const isQueued = deepFetchQueue.has(v.asin);
-                const hasCache = cache[v.asin] && cache[v.asin].length >= 3;
+                // Validation: Only skip if we have a robust set of images (e.g. 6+)
+                // Many variants have 6-7 images. If we only have 1-3, it's likely just the swatch or incomplete data.
+                const hasCache = cache[v.asin] && cache[v.asin].length >= 6;
+
+                // Also check quality - if all cached images are tiny/thumbnails, re-fetch
+                const hasHighQuality = hasCache && cache[v.asin].some(url => !url.includes('._AC_') && !url.includes('._SS'));
 
                 // If fastMode, retry even if visited, provided we don't have good cache
                 // But still respect the queue to avoid double-fetching
-                if (isVisited && !fastMode) return false;
+                if (isVisited && !fastMode && hasCache) return false;
 
-                return !hasCache && !isQueued && v.asin !== currentAsin;
+                return (!hasCache || !hasHighQuality) && !isQueued && v.asin !== currentAsin;
             });
 
             if (targets.length === 0) return;
@@ -1088,16 +1106,29 @@ export default defineContentScript({
                         while ((match = scriptRegex.exec(html)) !== null) {
                             const scriptContent = match[1];
                             if (scriptContent.includes('ImageBlockATF')) {
+                                // 1. Try hiRes first
                                 const hiResMatches = scriptContent.match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/g);
-                                if (hiResMatches) {
-                                    const found = hiResMatches
+                                if (hiResMatches && hiResMatches.length > 2) {
+                                    extractedImages = hiResMatches
                                         .map(m => m.match(/"(https:\/\/[^"]+)"/)?.[1])
                                         .filter((url): url is string => !!url);
-                                    if (found.length > 0) {
-                                        extractedImages = found;
-                                        break;
+                                    break;
+                                }
+
+                                // 2. Fallback: Capture 'large' or 'main' and convert to high-res
+                                // This handles cases where 'hiRes' key is missing or sparse
+                                const largeMatches = scriptContent.match(/"(?:large|main)"\s*:\s*"(https:\/\/[^"]+)"/g);
+                                if (largeMatches) {
+                                    const candidates = largeMatches
+                                        .map(m => m.match(/"(https:\/\/[^"]+)"/)?.[1])
+                                        .filter((url): url is string => !!url)
+                                        .map(url => toHighRes(url)); // Ensure high-res
+
+                                    if (candidates.length > extractedImages.length) {
+                                        extractedImages = candidates;
                                     }
                                 }
+                                if (extractedImages.length > 0) break;
                             }
                         }
 
@@ -1106,10 +1137,18 @@ export default defineContentScript({
                             const colorImagesMatch = html.match(/'colorImages':\s*({[\s\S]*?})\s*,/);
                             if (colorImagesMatch) {
                                 const hiResMatches = colorImagesMatch[1].match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/g);
-                                if (hiResMatches) {
+                                if (hiResMatches && hiResMatches.length > 2) {
                                     extractedImages = hiResMatches
                                         .map(m => m.match(/"(https:\/\/[^"]+)"/)?.[1])
                                         .filter((url): url is string => !!url);
+                                } else {
+                                    const largeMatches = colorImagesMatch[1].match(/"(?:large|main)"\s*:\s*"(https:\/\/[^"]+)"/g);
+                                    if (largeMatches) {
+                                        extractedImages = largeMatches
+                                            .map(m => m.match(/"(https:\/\/[^"]+)"/)?.[1])
+                                            .filter((url): url is string => !!url)
+                                            .map(url => toHighRes(url));
+                                    }
                                 }
                             }
                         }
@@ -1130,12 +1169,32 @@ export default defineContentScript({
                         if (extractedImages.length === 0) {
                             const galleryMatch = html.match(/imageGalleryData\s*:\s*(\[[\s\S]*?\])/);
                             if (galleryMatch) {
-                                const urls = galleryMatch[1].match(/"mainUrl"\s*:\s*"(https:\/\/[^"]+)"/g);
+                                const urls = galleryMatch[1].match(/"(?:mainUrl|url)"\s*:\s*"(https:\/\/[^"]+)"/g);
                                 if (urls) {
                                     extractedImages = urls
                                         .map(m => m.match(/"(https:\/\/[^"]+)"/)?.[1])
-                                        .filter((url): url is string => !!url);
+                                        .filter((url): url is string => !!url)
+                                        .map(url => toHighRes(url));
                                 }
+                            }
+                        }
+
+                        // STRATEGY E: data-a-dynamic-image (Hidden High-Res Candidates) - Critical for some variants
+                        if (extractedImages.length === 0) {
+                            // Robust regex to capture attribute value (handling potential escaping)
+                            const dynamicMatch = html.match(/data-a-dynamic-image\s*=\s*"([^"]+)"/);
+                            if (dynamicMatch) {
+                                try {
+                                    // Decode HTML entities (crucial for data attributes)
+                                    let jsonStr = dynamicMatch[1];
+                                    jsonStr = jsonStr.replace(/&quot;/g, '"').replace(/&#34;/g, '"');
+
+                                    const parsed = JSON.parse(jsonStr);
+                                    const urls = Object.keys(parsed);
+                                    if (urls.length > 0) {
+                                        extractedImages = urls.map(url => toHighRes(url));
+                                    }
+                                } catch (e) { }
                             }
                         }
 
@@ -1344,16 +1403,7 @@ export default defineContentScript({
                 const scrapedVariants = scrapeVariants(isHoveringVariant);
                 variants = scrapedVariants;
 
-                // MERGE CACHED VIDEOS into variants (since scrapeVariants doesn't do it)
-                // @ts-ignore
-                const vCache = (window._amzVideoCache || {}) as Record<string, string[]>;
-                if (Object.keys(vCache).length > 0) {
-                    variants.forEach(v => {
-                        if (vCache[v.asin] && vCache[v.asin].length > 0) {
-                            v.videos = vCache[v.asin];
-                        }
-                    });
-                }
+                // MERGE CACHED VIDEOS handled inside scrapeVariants now
 
                 // TRIGGER DEEP FETCH (Background - Fast Mode FORCE)
                 // This will silently fill the cache and update the UI incrementally but rapidly
@@ -1689,7 +1739,37 @@ export default defineContentScript({
                     }
                 });
 
-                // 2. Extract from visible review tiles in DOM
+                // 2. DOM Scraping for Product Images (Fallback/Verification)
+                // Ensure what the user sees is also scraped, even if scripts fail
+                if (onProductPage) {
+                    const domProdSelectors = [
+                        '#altImages li.item img',
+                        '#imageBlock .imageThumbnail img',
+                        '#altImages .a-unordered-list .a-list-item img',
+                        '#imageBlock .a-unordered-list li img',
+                        '.a-unordered-list.a-vertical li img', // Generic vertical list often used for galleries
+                        '#main-image-container img',
+                        '#landingImage',
+                        '.item.imageThumbnail img',
+                        'div#ivLargeImage img'
+                    ];
+
+                    document.querySelectorAll(domProdSelectors.join(', ')).forEach(el => {
+                        const img = el as HTMLImageElement;
+                        // Try src, data-src, or data-old-hires
+                        const src = img.src || img.getAttribute('data-src') || img.getAttribute('data-old-hires');
+                        if (src && isValidImage(src)) {
+                            // If it's a tiny thumbnail, try to find a hi-res replacement pattern or rely on toHighRes()
+                            // toHighRes already handles most patterns.
+                            // However, sometimes we need to be careful not to add junk.
+
+                            // Check for "sprite" or "transparent" is handled by isValidImage.
+                            addUniqueImage(src);
+                        }
+                    });
+                }
+
+                // 3. Extract from visible review tiles in DOM
                 const reviewImageSelectors = [
                     '[data-hook="review-image-tile"]',
                     '.review-image-tile',
@@ -1912,8 +1992,9 @@ export default defineContentScript({
                             vMatch.forEach(vUrl => {
                                 const cleanUrl = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '');
                                 if (!isPromotionalContent(scriptContent, cleanUrl)) {
-                                    if (isReviewVideoContext(scriptContent, cleanUrl)) addReviewVideo(cleanUrl);
-                                    else if (isOfficialProductVideo(scriptContent, cleanUrl)) addProductVideo(cleanUrl);
+                                    // PRIORITY FIX: Check Official Context FIRST
+                                    if (isOfficialProductVideo(scriptContent, cleanUrl)) addProductVideo(cleanUrl);
+                                    else if (isReviewVideoContext(scriptContent, cleanUrl)) addReviewVideo(cleanUrl);
                                 }
                             });
                         }
@@ -2238,15 +2319,17 @@ export default defineContentScript({
                                 if (source) videoUrl = source.src;
                             }
                         } else {
-                            // Check for data-video-url or encoded video JSON
-                            videoUrl = el.getAttribute('data-video-url') || el.getAttribute('data-reorder-video-url') || '';
+                            // Check for various data attributes
+                            videoUrl = el.getAttribute('data-video-url') ||
+                                el.getAttribute('data-reorder-video-url') ||
+                                el.getAttribute('data-video-source') || '';
 
                             // If it's a JSON block (common in review gallery)
-                            const videoData = el.getAttribute('data-a-video-data');
+                            const videoData = el.getAttribute('data-a-video-data') || el.getAttribute('data-a-player-preload');
                             if (videoData) {
                                 try {
                                     const parsed = JSON.parse(videoData);
-                                    const url = parsed.url || parsed.videoUrl || (parsed.sources && parsed.sources[0]?.url);
+                                    const url = parsed.url || parsed.videoUrl || (parsed.sources && parsed.sources[0]?.url) || parsed.progressiveUrl;
                                     if (url) videoUrl = url;
                                 } catch (e) { }
                             }
@@ -2255,6 +2338,37 @@ export default defineContentScript({
                             addReviewVideo(videoUrl);
                         }
                     });
+
+                // 5. FORCE SCAN: Deep scan of customer review section for ANY video data attributes
+                // This catches custom player implementations where the data might be on a container div/span
+                const reviewContainers = document.querySelectorAll('#customer-reviews, #cm_cr-review_list, .cr-widget-FocalReviews');
+                reviewContainers.forEach(container => {
+                    const videoDataElements = container.querySelectorAll('[data-a-player-preload], [data-a-video-data], [data-video-url]');
+                    videoDataElements.forEach(el => {
+                        try {
+                            // Direct URL
+                            const directUrl = el.getAttribute('data-video-url');
+                            if (directUrl && directUrl.startsWith('http')) {
+                                addReviewVideo(directUrl);
+                            }
+
+                            // JSON Data
+                            const jsonStr = el.getAttribute('data-a-player-preload') || el.getAttribute('data-a-video-data');
+                            if (jsonStr) {
+                                const parsed = JSON.parse(jsonStr);
+                                // Try common Amazon video JSON structures
+                                const foundUrl = parsed.url ||
+                                    parsed.videoUrl ||
+                                    parsed.progressiveUrl ||
+                                    (parsed.sources && parsed.sources[0]?.url);
+
+                                if (foundUrl && typeof foundUrl === 'string' && foundUrl.startsWith('http')) {
+                                    addReviewVideo(foundUrl);
+                                }
+                            }
+                        } catch (e) { }
+                    });
+                });
 
                 // 4. Generic video fallback - STRICT categorization based on DOM location
                 document.querySelectorAll<HTMLVideoElement>('video')
@@ -2376,12 +2490,16 @@ export default defineContentScript({
                 const currentVariant = variants.find(v => v.asin === asin);
                 if (currentVariant) {
                     // Images Sync
+                    // REMOVED BY REQUEST: Do not sync full gallery to active variant in the list.
+                    // The active variant should also only keep its single thumbnail in the backend object for the sidebar list.
+                    /*
                     if (uniqueProductImages.length > 1) {
                         if (!currentVariant.images || uniqueProductImages.length > currentVariant.images.length) {
                             currentVariant.images = [...uniqueProductImages];
                             scrapedVariantImagesByAsin[asin] = [...uniqueProductImages];
                         }
                     }
+                    */
 
                     // Videos Sync - Crucial for the active variant
                     const uniqueVideos = [...new Set(videos)];

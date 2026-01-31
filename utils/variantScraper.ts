@@ -27,8 +27,14 @@ function extractImageUrl(entry: ColorImageEntry): string {
 }
 
 function getImageCoreId(url: string): string {
-    const match = url.match(/images\/I\/([A-Za-z0-9]+)/);
-    return match ? match[1] : url.split('?')[0];
+    // Robust extraction of Amazon Image ID (handles _, -, +, %)
+    const match = url.match(/\/I\/([A-Za-z0-9\-+%]+)/);
+    if (match) return match[1].split('.')[0]; // Ensure we strip extension if caught
+
+    // Fallback: Try to just get the filename without extension
+    const parts = url.split('/');
+    const filename = parts[parts.length - 1] || url;
+    return filename.split('.')[0];
 }
 
 function safeParseJSON<T>(jsonStr: string): T | null {
@@ -51,7 +57,7 @@ function maximizeImageQuality(url: string): string {
 }
 
 /* ============================
-   🔧 FIX START (NEW, SAFE)
+   🔧 HELPERS
    ============================ */
 function hydrateAllVariantImages(
     asinToImages: Record<string, string[]>,
@@ -71,9 +77,148 @@ function hydrateAllVariantImages(
         }
     });
 }
+
+function hydrateAllVariantVideos(
+    variants: VariantItem[],
+    videoCache: Record<string, string[]>
+) {
+    variants.forEach(variant => {
+        // If we don't have videos, or cache has MORE/DIFFERENT videos, merge/update
+        if (!variant.videos || variant.videos.length === 0) {
+            if (videoCache[variant.asin] && videoCache[variant.asin].length > 0) {
+                variant.videos = [...videoCache[variant.asin]];
+            }
+        }
+    });
+}
+
 /* ============================
-   🔧 FIX END
+   🎥 NEW: OFFICIAL VIDEO SCRAPER
    ============================ */
+function scrapeOfficialVideos(root: HTMLElement): string[] {
+    const videos: string[] = [];
+    const seen = new Set<string>();
+
+    // 1. Parse 'imageGalleryData' (Common in modern layouts)
+    // This strictly contains the "Product Variant Gallery" media
+    const scripts = root.querySelectorAll('script:not([src])');
+    scripts.forEach(script => {
+        const content = script.textContent || '';
+        if (content.includes('imageGalleryData')) {
+            const galleryMatch = content.match(/imageGalleryData\s*:\s*(\[[\s\S]*?\])/);
+            if (galleryMatch) {
+                try {
+                    const gallery = safeParseJSON<any[]>(galleryMatch[1]);
+                    if (Array.isArray(gallery)) {
+                        gallery.forEach(item => {
+                            if (item.mediaType === 'video' && item.url) {
+                                if (!seen.has(item.url)) {
+                                    seen.add(item.url);
+                                    videos.push(item.url);
+                                }
+                            }
+                        });
+                    }
+                } catch {
+                    // Fallback regex if dict parsing fails
+                    const videoUrls = content.match(/"url"\s*:\s*"(https:\/\/[^"]+\.(?:mp4|m3u8)[^"]*)"/g);
+                    if (videoUrls) {
+                        videoUrls.forEach(match => {
+                            const url = match.match(/"(https:\/\/[^"]+)"/)?.[1];
+                            if (url && !seen.has(url)) {
+                                seen.add(url);
+                                videos.push(url);
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        // 2. REMOVED: Loose "videos" grep. 
+        // We strictly rely on imageGalleryData and DOM to prevent pollution from other datasets.
+    });
+
+    // 3. Look for DOM Video Elements (Fresh Scrape)
+    // Strictly search within the product gallery container, NOT the reviews section
+    const galleryContainer = root.querySelector('#imageBlock, #altImages, #main-image-container');
+    if (galleryContainer) {
+        // Video identifiers in gallery
+        galleryContainer.querySelectorAll('video, .video-container source').forEach(el => {
+            const v = el as HTMLMediaElement | HTMLSourceElement;
+            if (v.src && !seen.has(v.src)) {
+                seen.add(v.src);
+                videos.push(v.src);
+            }
+        });
+    }
+
+    return videos;
+}
+
+/* ============================
+   📸 NEW: ACTIVE GALLERY SCRAPER
+   ============================ */
+function scrapeActiveVariantGallery(root: HTMLElement): string[] {
+    const images: string[] = [];
+    const seen = new Set<string>();
+
+    const addImage = (url: string) => {
+        if (!url) return;
+        const highRes = maximizeImageQuality(url);
+        // Exclude specific patterns like placeholders
+        if (highRes.includes('sprite') || highRes.includes('play-icon') || highRes.includes('video-icon')) return;
+
+        const core = getImageCoreId(highRes);
+        if (!seen.has(core)) {
+            seen.add(core);
+            images.push(highRes);
+        }
+    };
+
+    // 1. Priority: Modern 'imageGalleryData' script
+    // This often contains the FULL list of images (12+) even if the DOM only renders 7-8 thumbnails.
+    const scripts = root.querySelectorAll('script:not([src])');
+    for (const script of Array.from(scripts)) {
+        if (script.textContent?.includes('imageGalleryData')) {
+            const match = script.textContent.match(/imageGalleryData\s*:\s*(\[[\s\S]*?\])/);
+            if (match) {
+                try {
+                    const data = JSON.parse(match[1]);
+                    data.forEach((item: any) => {
+                        // We primarily want images here. Videos are handled separately but added for completeness if scraping everything.
+                        if (item.mediaType === 'image' && item.url) addImage(item.url);
+                    });
+                } catch { }
+            }
+        }
+    }
+
+    // 2. Supplement: Standard Alt Images (Visible Thumbnails)
+    // If script didn't yield anything or is missing, these are our best bet.
+    // Even if script worked, checking these ensures we don't miss anything actually displayed.
+    const altImages = root.querySelectorAll('#altImages ul li.item img');
+    altImages.forEach(img => addImage((img as HTMLImageElement).src));
+
+    // 3. Supplement: Main Image
+    const mainImg = root.querySelector('#landingImage, #imgTagWrapperId img') as HTMLImageElement;
+    if (mainImg) addImage(mainImg.src);
+
+    // 4. Supplement: Dynamic Image Data (Hidden High-Res Candidates)
+    // This attribute often contains the FULL set of images for the active variant, even if not all are rendered as thumbnails.
+    const dynamicContainers = root.querySelectorAll('#main-image-container, #landingImage, #imgTagWrapperId, .imgTagWrapper, #imageBlock');
+    dynamicContainers.forEach(container => {
+        const data = container.getAttribute('data-a-dynamic-image');
+        if (data) {
+            try {
+                const parsed = JSON.parse(data);
+                Object.keys(parsed).forEach(url => addImage(url));
+            } catch { }
+        }
+    });
+
+    return images;
+}
 
 export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
     const variants: VariantItem[] = [];
@@ -88,6 +233,7 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
     let colorImages: Record<string, string[]> = {};
     let dimensionValues: Record<string, string[]> = {};
     let asinToImages: Record<string, string[]> = {};
+    let asinToVideos: Record<string, string[]> = {}; // New: Store videos map
 
     let currentAsin =
         (document.getElementById('ASIN') as HTMLInputElement)?.value || '';
@@ -108,12 +254,55 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
     // @ts-ignore
     const globalCache = window._amzImageCache as Record<string, string[]>;
 
-    /* ========= SCRIPT PARSING (UNCHANGED) ========= */
+    // @ts-ignore
+    if (!window._amzVideoCache) window._amzVideoCache = {};
+    // @ts-ignore
+    const globalVideoCache = window._amzVideoCache as Record<string, string[]>;
+
+    // @ts-ignore
+    if (!window._amzFullGalleryCache) window._amzFullGalleryCache = {};
+    // @ts-ignore
+    const fullGalleryCache = window._amzFullGalleryCache as Record<string, string[]>;
+
+    /* ========= SCRIPT PARSING (With Updates) ========= */
     scripts.forEach(script => {
         const content = script.textContent || '';
         if (content.length < 100) return;
 
-        if (content.includes('colorToAsin') && !Object.keys(colorToAsin).length) {
+        // NEW: Global search for imageGalleryData (The "Gold Standard" for the active ASIN)
+        // This script usually contains the FULL list of images (12+), unlike colorImages which is truncated.
+        if (content.includes('imageGalleryData') && currentAsin) {
+            const galleryMatch = content.match(/imageGalleryData\s*:\s*(\[[\s\S]*?\])/);
+            if (galleryMatch) {
+                try {
+                    const gallery = safeParseJSON<any[]>(galleryMatch[1]);
+                    if (Array.isArray(gallery)) {
+                        const fullGalleryImages: string[] = [];
+                        const seen = new Set<string>();
+                        gallery.forEach(item => {
+                            if (item.mediaType === 'image' && item.url) {
+                                const highRes = maximizeImageQuality(item.url);
+                                const core = getImageCoreId(highRes);
+                                if (!seen.has(core)) {
+                                    seen.add(core);
+                                    fullGalleryImages.push(highRes);
+                                }
+                            }
+                        });
+
+                        // If we found a substantial gallery, this is likely the authoritative source for the current ASIN.
+                        // We store it immediately. This overwrites potentially truncated 'colorImages' data for this ASIN.
+                        if (fullGalleryImages.length > 0) {
+                            asinToImages[currentAsin] = fullGalleryImages;
+                            // PERSIST: Lock this high-quality data into the full gallery cache
+                            fullGalleryCache[currentAsin] = fullGalleryImages;
+                        }
+                    }
+                } catch { }
+            }
+        }
+
+        if (content.includes('colorToAsin')) {
             const match = content.match(/colorToAsin["']?\s*:\s*(\{[^}]+\})/);
             if (match) {
                 const parsed = safeParseJSON<Record<string, any>>(match[1]);
@@ -127,8 +316,7 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
 
         if (
             (content.includes('colorImages') ||
-                content.includes('initialColorImages')) &&
-            !Object.keys(colorImages).length
+                content.includes('initialColorImages'))
         ) {
             const match = content.match(
                 /(colorImages|initialColorImages)\s*[:=]\s*(\{[\s\S]*?\})/
@@ -142,7 +330,7 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
                         const urls: string[] = [];
                         const seen = new Set<string>();
                         v.forEach(e => {
-                            const url = extractImageUrl(e);
+                            const url = maximizeImageQuality(extractImageUrl(e));
                             if (url) {
                                 const core = getImageCoreId(url);
                                 if (!seen.has(core)) {
@@ -151,7 +339,22 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
                                 }
                             }
                         });
-                        if (urls.length) colorImages[k] = urls;
+                        if (urls.length) {
+                            if (colorImages[k]) {
+                                // Merge if already exists to capture data from multiple script blocks
+                                // (Rare but possible if Amazon splits data)
+                                const existing = colorImages[k];
+                                const existingSet = new Set(existing); // Check full URL
+                                urls.forEach(u => {
+                                    if (!existingSet.has(u)) {
+                                        existing.push(u);
+                                        existingSet.add(u);
+                                    }
+                                });
+                            } else {
+                                colorImages[k] = urls;
+                            }
+                        }
                     });
                 }
             }
@@ -167,16 +370,47 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
             }
         }
 
+        // ImageBlockATF (Usually specific to current variant, but verifying)
         if (content.includes('ImageBlockATF') && currentAsin) {
-            const hiResMatches = content.match(
-                /"hiRes"\s*:\s*"(https:\/\/[^"]+)"/g
-            );
-            if (hiResMatches) {
-                asinToImages[currentAsin] = asinToImages[currentAsin] || [];
-                hiResMatches.forEach(m => {
-                    const url = m.match(/"(https:\/\/[^"]+)"/)?.[1];
-                    if (url) asinToImages[currentAsin].push(url);
-                });
+            let extractedMatches: string[] = [];
+            const hiResMatches = content.match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/g);
+            if (hiResMatches && hiResMatches.length > 0) {
+                extractedMatches = hiResMatches
+                    .map(m => {
+                        const raw = m.match(/"(https:\/\/[^"]+)"/)?.[1];
+                        return raw ? maximizeImageQuality(raw) : undefined;
+                    })
+                    .filter((u): u is string => !!u);
+            }
+            // Fallback
+            const largeMatches = content.match(/"(?:large|main)"\s*:\s*"(https:\/\/[^"]+)"/g);
+            if (largeMatches) {
+                const candidates = largeMatches
+                    .map(m => m.match(/"(https:\/\/[^"]+)"/)?.[1])
+                    .filter((u): u is string => !!u)
+                    .map(u => maximizeImageQuality(u));
+
+                if (candidates.length > extractedMatches.length) {
+                    extractedMatches = candidates;
+                }
+            }
+
+            if (extractedMatches.length > 0) {
+                if (asinToImages[currentAsin]) {
+                    // MERGE, don't overwrite!
+                    const existingSet = new Set(asinToImages[currentAsin]);
+                    extractedMatches.forEach(url => {
+                        const core = getImageCoreId(url);
+                        // We check core ID to strictly dedupe, but we push the URL only if exact url isn't there? 
+                        // Actually, asinToImages stores URLs. Let's just check URL presence for simplicity or core ID if we want to be strict.
+                        if (!existingSet.has(url)) {
+                            asinToImages[currentAsin].push(url);
+                            existingSet.add(url);
+                        }
+                    });
+                } else {
+                    asinToImages[currentAsin] = extractedMatches;
+                }
             }
         }
     });
@@ -184,9 +418,79 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
     /* ========= MAP COLOR → ASIN ========= */
     Object.entries(colorToAsin).forEach(([color, asin]) => {
         if (colorImages[color]) {
-            asinToImages[asin] = colorImages[color];
+            const incoming = colorImages[color];
+            if (asinToImages[asin]) {
+                const existingSet = new Set(asinToImages[asin]);
+                incoming.forEach(url => {
+                    if (!existingSet.has(url)) {
+                        asinToImages[asin].push(url);
+                        existingSet.add(url);
+                    }
+                });
+            } else {
+                asinToImages[asin] = incoming;
+            }
+        }
+
+        if (asinToImages[asin] && !colorImages[color]) {
+            colorImages[color] = asinToImages[asin];
         }
     });
+
+    /* ========= 🌟 FRESH VARIANT-LEVEL SCRAPE (Official Gallery) ========= */
+    if (currentAsin) {
+        // 1. Fresh Image Scrape (DOM)
+        const freshImages = scrapeActiveVariantGallery(scraperRoot as HTMLElement);
+
+        // VALIDATION: Prevent race condition where DOM images are from previous variant
+        // We check if the fresh images have any overlap with the script/data images we know belong to this ASIN.
+        const knownScriptImages = asinToImages[currentAsin] || [];
+        let isFreshDataValid = true;
+
+        if (knownScriptImages.length > 0 && freshImages.length > 0) {
+            const scriptIds = new Set(knownScriptImages.map(u => getImageCoreId(u)));
+            const freshIds = freshImages.map(u => getImageCoreId(u));
+
+            // Check for at least ONE matching image between script data and visual DOM
+            const hasOverlap = freshIds.some(id => scriptIds.has(id));
+
+            if (!hasOverlap) {
+                // If NO overlap, the DOM is likely lagging behind the ASIN switch.
+                // We should NOT use these images as they likely belong to the previous variant.
+                isFreshDataValid = false;
+            }
+        }
+
+        if (isFreshDataValid) {
+            if (freshImages.length > 0) {
+                // If we already have more images (e.g. from global imageGalleryData), don't degrade to a smaller set
+                // MERGE instead of overwrite
+                if (asinToImages[currentAsin]) {
+                    const existing = asinToImages[currentAsin];
+                    // If fresh has MORE, or distinct images, we want them.
+                    // If existing has MORE (e.g. 12 vs 8), we definitely want to keep existing.
+                    const existingSet = new Set(existing);
+                    freshImages.forEach(url => {
+                        if (!existingSet.has(url)) {
+                            existing.push(url);
+                            existingSet.add(url);
+                        }
+                    });
+                    // asinToImages[currentAsin] is already updated via push
+                } else {
+                    asinToImages[currentAsin] = freshImages;
+                }
+            }
+
+            // 2. Fresh Video Scrape (Official) - Only if images are valid
+            const freshVideos = scrapeOfficialVideos(scraperRoot as HTMLElement);
+            if (freshVideos.length > 0) {
+                asinToVideos[currentAsin] = freshVideos;
+                // Update global cache immediately
+                globalVideoCache[currentAsin] = freshVideos;
+            }
+        }
+    }
 
     /* ========= CACHE MERGE ========= */
     Object.entries(asinToImages).forEach(([asin, imgs]) => {
@@ -197,31 +501,18 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
         if (!asinToImages[asin]) asinToImages[asin] = imgs;
     });
 
-    /* ============================
-       🔧 FIX APPLICATION (NEW)
-       ============================ */
-
-    // Scrape DOM swatches for thumbnails - TARGETED SELECTOR
+    /* ========= SCRAPE DOM THUMBNAILS (Existence Check) ========= */
     const domThumbnails: Record<string, string> = {};
-
-    // START FIX: Restrict search to variation containers only
-    // This prevents picking up "Recommended Products" or "Frequently bought together" items 
-    // which also have data-asin attributes.
     const variationContainer = document.querySelector(
         '#twister, #twisterContainer, #softlinesTwister, #tmmSwatches, [id^="variation_"], #icebreaker-variations'
     );
 
     if (variationContainer) {
-        // Look for any element with data-asin (li, span, div, input, etc) INSIDE the container
         variationContainer.querySelectorAll('[data-asin], [data-defaultasin]').forEach(el => {
             const asin = el.getAttribute('data-asin') || el.getAttribute('data-defaultasin');
             if (!asin) return;
-
-            // Strategy: Look for img inside, or if the element itself is an img
             let img = el.querySelector('img');
             if (!img && el.tagName === 'IMG') img = el as HTMLImageElement;
-
-            // Sometimes the image is in a sibling or parent label (handling specific layouts)
             if (!img && el.tagName === 'INPUT') {
                 const id = el.getAttribute('id');
                 if (id) {
@@ -229,39 +520,44 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
                     if (label) img = label.querySelector('img');
                 }
             }
-
             if (asin && img && img.src) {
                 domThumbnails[asin] = maximizeImageQuality(img.src);
             }
         });
     }
-    // END FIX
 
     const allVariantAsins = new Set([
         ...Object.keys(dimensionValues),
         ...Object.values(colorToAsin),
-        // FIX: Do NOT include globalCache keys here. 
-        // Cache should only be a data source for images, not a source of truth for *existence* of variants.
-        // This prevents variants from previously visited products (persisted in SPA navigation) 
-        // from showing up on the current product page.
-        ...Object.keys(domThumbnails)
+        ...Object.keys(domThumbnails) // Only use present thumbnails
     ]);
+
+    // RESTORE FROM FULL GALLERY CACHE:
+    // If we have "better" data in our authoritative cache than what we scraped this run, use it.
+    // We strictly Prefer the "Gold Standard" cache if available to prevent "additional images" (duplicates)
+    // from inferior sources like ImageBlockATF or DOM merging.
+    Object.keys(fullGalleryCache).forEach(asin => {
+        if (allVariantAsins.has(asin)) {
+            const cached = fullGalleryCache[asin];
+            // If we have authoritative data, use it. Even if 'current' is longer (which implies duplicates/junk).
+            if (cached && cached.length > 0) {
+                asinToImages[asin] = cached;
+            }
+        }
+    });
 
     hydrateAllVariantImages(asinToImages, allVariantAsins, globalCache);
 
     /* ========= BUILD VARIANTS ========= */
-    // If dimensionValues is empty (some pages don't use it), try built from all known ASINs (derived from Page/DOM only)
     const asinsToBuild = Object.keys(dimensionValues).length > 0
         ? Object.keys(dimensionValues)
         : Array.from(allVariantAsins);
 
     asinsToBuild.forEach((asin) => {
-        // Name resolution
         let name = "Variant " + asin;
         if (dimensionValues[asin]) {
             name = dimensionValues[asin].join(' + ');
         } else {
-            // Try to reverse lookup name from colorToAsin if possible or leave generic
             const color = Object.keys(colorToAsin).find(key => colorToAsin[key] === asin);
             if (color) name = color;
         }
@@ -269,44 +565,50 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
         let images = asinToImages[asin] || [];
         const thumbnail = domThumbnails[asin];
 
-        // If we have no gallery images but we DO have a thumbnail, 
-        // add the thumbnail to the images list so it's downloadable and counts as 1.
         if (images.length === 0 && thumbnail) {
             images = [thumbnail];
         }
 
-        // Use full image gallery first, then DOM thumbnail
-        // Ensure we prioritize high-res if available in images[0]
         let mainImage = images.length > 0 ? images[0] : thumbnail;
+
+        // Resolve Videos
+        let videos = asinToVideos[asin] || [];
+        // If not found in fresh scrape, try cache
+        if (videos.length === 0 && globalVideoCache[asin]) {
+            videos = globalVideoCache[asin];
+        }
 
         variants.push({
             asin,
             name: name,
             image: mainImage,
-            images,
+            images: images,
+            videos: videos, // Attached Videos!
             selected: asin === currentAsin,
             available: true
         });
     });
 
-    // Fallback: If no variants found (singleton product), ensure we return the current product
+    // Fallback Singleton
     if (variants.length === 0 && currentAsin) {
-        // Try to find the main image
         const mainImg = document.querySelector('#landingImage') as HTMLImageElement;
         const mainUrl = mainImg ? maximizeImageQuality(mainImg.src) : '';
-
-        // Check if we have images from scripts even if we didn't build variants
         const scriptImages = asinToImages[currentAsin] || [];
+        const scriptVideos = asinToVideos[currentAsin] || globalVideoCache[currentAsin] || [];
 
         variants.push({
             asin: currentAsin,
             name: "Product",
             image: mainUrl || (scriptImages.length > 0 ? scriptImages[0] : ''),
             images: scriptImages.length > 0 ? scriptImages : (mainUrl ? [mainUrl] : []),
+            videos: scriptVideos,
             selected: true,
             available: true
         });
     }
+
+    // Don't need hydration for videos anymore as we did it inline, but keeping safety check
+    hydrateAllVariantVideos(variants, globalVideoCache);
 
     return variants;
 }
