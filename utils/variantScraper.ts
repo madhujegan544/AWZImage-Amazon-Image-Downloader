@@ -150,15 +150,24 @@ function scrapeOfficialVideos(root: HTMLElement): string[] {
     });
 
     // 3. Look for DOM Video Elements (Fresh Scrape)
-    // Strictly search within the product gallery container, NOT the reviews section
+    // Strictly search within the product gallery container
     const galleryContainer = root.querySelector('#imageBlock, #altImages, #main-image-container');
     if (galleryContainer) {
-        // Video identifiers in gallery
         galleryContainer.querySelectorAll('video, .video-container source').forEach(el => {
             const v = el as HTMLMediaElement | HTMLSourceElement;
-            if (v.src && !seen.has(v.src)) {
-                seen.add(v.src);
-                videos.push(v.src);
+            const src = v.src;
+
+            // STRICT VALIDATION:
+            // 1. Must be HTTP/HTTPS (no blobs, no data URIs)
+            // 2. Must look like a video file (mp4, m3u8, webm)
+            if (src && src.startsWith('http')) {
+                const lower = src.toLowerCase();
+                if (lower.includes('.mp4') || lower.includes('.m3u8') || lower.includes('.webm')) {
+                    if (!seen.has(src)) {
+                        seen.add(src);
+                        videos.push(src);
+                    }
+                }
             }
         });
     }
@@ -485,8 +494,18 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
             const freshVideos = scrapeOfficialVideos(scraperRoot as HTMLElement);
             if (freshVideos.length > 0) {
                 asinToVideos[currentAsin] = freshVideos;
-                // Update global cache immediately
-                globalVideoCache[currentAsin] = freshVideos;
+                // Merge active videos into cache instead of overwriting to prevent data loss on brief DOM glitches
+                if (!globalVideoCache[currentAsin]) {
+                    globalVideoCache[currentAsin] = freshVideos;
+                } else {
+                    const existingSet = new Set(globalVideoCache[currentAsin]);
+                    freshVideos.forEach(v => {
+                        if (!existingSet.has(v)) {
+                            globalVideoCache[currentAsin].push(v);
+                            existingSet.add(v);
+                        }
+                    });
+                }
             }
         }
     }

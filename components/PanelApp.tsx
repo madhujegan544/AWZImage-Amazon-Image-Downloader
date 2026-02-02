@@ -445,13 +445,21 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     <img src={item.url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" />
                 )}
 
-                {/* Badges */}
-                <div style={{ position: 'absolute', top: '6px', left: '6px', display: 'flex', gap: '4px', pointerEvents: 'none' }}>
+                {/* Badges - Icon Overlay for Video Only */}
+                <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', pointerEvents: 'none', zIndex: 5 }}>
                     {isVideo && (
-                        <span style={{
-                            background: 'rgba(0, 0, 0, 0.6)', backdropFilter: 'blur(4px)',
-                            color: '#fff', fontSize: '9px', fontWeight: 800, padding: '2px 6px', borderRadius: '4px'
-                        }}>VIDEO</span>
+                        <div style={{
+                            width: '32px', height: '32px',
+                            background: 'rgba(0, 0, 0, 0.4)',
+                            backdropFilter: 'blur(2px)',
+                            borderRadius: '50%',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            boxShadow: '0 2px 8px rgba(0,0,0,0.15)'
+                        }}>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="white" stroke="none">
+                                <path d="M8 5v14l11-7z" />
+                            </svg>
+                        </div>
                     )}
                 </div>
 
@@ -549,6 +557,9 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     // ============================================
     // Ref to track current data for comparison in callbacks without dependency cycles
     const productDataRef = useRef<ProductData | null>(null);
+    // Cache for review media keyed by ASIN to persist across navigation
+    const reviewCacheRef = useRef<Record<string, MediaItem[]>>({});
+
     useEffect(() => {
         productDataRef.current = productData;
     }, [productData]);
@@ -588,34 +599,11 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                         return;
                     }
                 }
-
                 setProductData(enrichedData);
 
                 if (enrichedData?.activeImage) {
                     setPreviewUrl(enrichedData.activeImage);
                 }
-
-                // Capture persistent reviews only if not already set
-                setPersistentReviews(prev => {
-                    if (prev.length > 0) return prev;
-                    if (!enrichedData) return prev;
-
-                    const reviews: MediaItem[] = [];
-                    const added = new Set<string>();
-                    (enrichedData.reviewImages || []).forEach(url => {
-                        if (url && !added.has(url)) {
-                            reviews.push({ url, type: 'image', source: 'review', category: 'reviewImage' });
-                            added.add(url);
-                        }
-                    });
-                    (enrichedData.reviewVideos || []).forEach(url => {
-                        if (url && !added.has(url)) {
-                            reviews.push({ url, type: 'video', source: 'review', category: 'reviewVideo' });
-                            added.add(url);
-                        }
-                    });
-                    return reviews;
-                });
             } else {
                 setError('No product data found on this page');
             }
@@ -628,6 +616,53 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             }
         }
     }, [scrapeProductData]);
+
+    // Reliable Persistent Reviews population with Caching by ASIN
+    // Triggers whenever productData updates (via load or poll)
+    useEffect(() => {
+        if (!productData?.asin) return;
+        const currentAsin = productData.asin;
+
+        // 1. Extract fresh reviews from current payload
+        const freshReviews: MediaItem[] = [];
+        const added = new Set<string>();
+
+        (productData.reviewImages || []).forEach(url => {
+            if (url && !added.has(url)) {
+                freshReviews.push({ url, type: 'image', source: 'review', category: 'reviewImage' });
+                added.add(url);
+            }
+        });
+        (productData.reviewVideos || []).forEach(url => {
+            if (url && !added.has(url)) {
+                freshReviews.push({ url, type: 'video', source: 'review', category: 'reviewVideo' });
+                added.add(url);
+            }
+        });
+
+        // 2. Update Cache if we found new data
+        if (freshReviews.length > 0) {
+            reviewCacheRef.current[currentAsin] = freshReviews;
+        }
+
+        // 3. Set State from Cache (preferred) or Fresh
+        // This ensures that if we revisit a page and scrape fails/delays, we show cached data immediately.
+        const cachedReviews = reviewCacheRef.current[currentAsin] || [];
+
+        // If we have cached data, use it (it might be richer if previous scrape got more)
+        // Or if fresh is better? Usually they should depend on scraping. 
+        // Let's rely on cache which accumulates or refreshing if fresh > 0.
+        // Actually best policy: if fresh found, overwrite cache (fresh is truth). If fresh empty, fallback to cache.
+
+        if (freshReviews.length > 0) {
+            setPersistentReviews(freshReviews);
+        } else if (cachedReviews.length > 0) {
+            setPersistentReviews(cachedReviews);
+        } else {
+            setPersistentReviews([]);
+        }
+    }, [productData]);
+
 
     useEffect(() => {
         // Initial load with scrolling
@@ -1273,56 +1308,80 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     }}
                 />
 
-                {/* Top-Anchored Dropdown Panel - Refined Premium UI */}
+                {/* Right-Side Drawer Panel - Refined Premium UI */}
                 <div style={{
                     position: 'absolute',
                     top: 0,
-                    left: 0,
-                    width: '100%',
+                    right: 0,
+                    width: '85%', // Drawer width
+                    height: '100%', // Full height
                     zIndex: 100,
                     background: COLORS.surface,
-                    borderBottomLeftRadius: '16px', // Reduced radius
-                    borderBottomRightRadius: '16px',
-                    boxShadow: '0 8px 30px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.04)',
+                    borderTopLeftRadius: '20px', // More modern radius
+                    borderBottomLeftRadius: '20px',
+                    boxShadow: '-8px 0 32px rgba(0,0,0,0.12)', // Softer shadow
                     display: 'flex',
                     flexDirection: 'column',
-                    maxHeight: '85vh',
                     overflow: 'hidden',
-                    animation: 'slideDown 0.3s cubic-bezier(0.2, 0.8, 0.2, 1)'
+                    animation: 'slideInRight 0.3s cubic-bezier(0.2, 0.8, 0.2, 1)'
                 }}>
-                    {/* Header Action Bar - Compact */}
+                    {/* Header Action Bar */}
+                    {/* Header Action Bar - Two Row Structure */}
+                    {/* Header Action Bar - Two Row Structure */}
                     <div style={{
-                        padding: '14px 20px', // Adjusted padding
+                        padding: '28px 24px 20px 24px', // More balanced vertical spacing
                         display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
+                        flexDirection: 'column',
+                        gap: '14px',
                         borderBottom: `1px solid ${COLORS.borderLight}`,
                         background: COLORS.surface,
-                        zIndex: 2
+                        zIndex: 2,
+                        flexShrink: 0
                     }}>
-                        {/* Title Section */}
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                            <div style={{
-                                width: '32px', height: '32px',
-                                background: COLORS.primaryGlow, // Use subtle glow
-                                borderRadius: '8px',
-                                color: COLORS.primary,
-                                display: 'flex', alignItems: 'center', justifyContent: 'center'
-                            }}>
-                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                    <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
-                                </svg>
-                            </div>
-                            <div>
-                                <h3 style={{ fontSize: '14px', fontWeight: 700, color: COLORS.text, margin: 0, lineHeight: '1.2' }}>Review Media</h3>
-                                <div style={{ fontSize: '11px', color: COLORS.textMuted, marginTop: '1px' }}>
-                                    {reviewCount} items found
+                        {/* Row 1: Primary Title & Close */}
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                <div style={{
+                                    width: '32px', height: '32px',
+                                    background: COLORS.primarySoft,
+                                    borderRadius: '8px',
+                                    color: COLORS.primary,
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center'
+                                }}>
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                        <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+                                    </svg>
                                 </div>
+                                <h3 style={{ fontSize: '18px', fontWeight: 800, color: COLORS.text, margin: 0, letterSpacing: '-0.3px' }}>Review Media</h3>
                             </div>
+
+                            <button
+                                onClick={() => setReviewSectionExpanded(false)}
+                                style={{
+                                    width: '32px', height: '32px', borderRadius: '50%',
+                                    background: COLORS.backgroundSecondary,
+                                    border: 'none',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    color: COLORS.textSecondary,
+                                    cursor: 'pointer',
+                                    transition: 'all 0.2s'
+                                }}
+                                onMouseEnter={e => { e.currentTarget.style.background = '#E2E8F0'; e.currentTarget.style.color = COLORS.text; }}
+                                onMouseLeave={e => { e.currentTarget.style.background = COLORS.backgroundSecondary; e.currentTarget.style.color = COLORS.textSecondary; }}
+                            >
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                                </svg>
+                            </button>
                         </div>
 
-                        {/* Actions */}
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        {/* Row 2: Secondary Meta & Actions */}
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <div style={{ fontSize: '12px', fontWeight: 600, color: COLORS.textMuted }}>
+                                {reviewCount} items found
+                            </div>
+
                             <button
                                 onClick={(e) => {
                                     e.stopPropagation();
@@ -1333,21 +1392,24 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                     }
                                 }}
                                 style={{
-                                    height: '28px', // Compact button
-                                    padding: '0 12px',
+                                    height: '28px',
+                                    padding: '0 14px',
                                     borderRadius: '6px',
                                     background: COLORS.primary,
                                     border: 'none',
                                     color: '#fff',
                                     fontSize: '11px',
-                                    fontWeight: 600,
+                                    fontWeight: 700,
                                     cursor: 'pointer',
                                     display: 'flex',
                                     alignItems: 'center',
                                     gap: '6px',
-                                    boxShadow: COLORS.shadowSm,
-                                    transition: 'background 0.2s'
+                                    boxShadow: COLORS.shadowPrimary,
+                                    transition: 'transform 0.1s ease',
+                                    whiteSpace: 'nowrap'
                                 }}
+                                onMouseDown={e => e.currentTarget.style.transform = 'scale(0.97)'}
+                                onMouseUp={e => e.currentTarget.style.transform = 'scale(1)'}
                             >
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                                     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -1356,46 +1418,28 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 </svg>
                                 Download All
                             </button>
-
-                            <button
-                                onClick={() => setReviewSectionExpanded(false)}
-                                style={{
-                                    width: '28px', height: '28px', borderRadius: '50%',
-                                    background: 'transparent',
-                                    border: 'none',
-                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                    color: COLORS.textMuted,
-                                    cursor: 'pointer',
-                                    transition: 'all 0.2s'
-                                }}
-                                onMouseEnter={e => { e.currentTarget.style.background = COLORS.backgroundSecondary; e.currentTarget.style.color = COLORS.text; }}
-                                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = COLORS.textMuted; }}
-                            >
-                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                    <line x1="18" y1="6" x2="6" y2="18"></line>
-                                    <line x1="6" y1="6" x2="18" y2="18"></line>
-                                </svg>
-                            </button>
                         </div>
                     </div>
 
                     {/* Content Area */}
                     <div style={{
-                        padding: '16px 20px 24px 20px', // More breathing room at bottom
+                        padding: '24px', // Uniform padding
                         overflowY: 'auto',
                         flex: 1,
-                        backgroundColor: COLORS.background // Distinct background for content
+                        backgroundColor: COLORS.background, // Distinct background
+                        display: 'flex',
+                        flexDirection: 'column'
                     }}>
 
-                        {/* Segmented Control - Modern & Slim */}
+                        {/* Segmented Control - Full Width & Balanced */}
                         <div style={{
                             display: 'flex',
-                            padding: '3px',
-                            background: '#E2E8F0', // Slightly darker unified bg
-                            borderRadius: '8px',
-                            marginBottom: '20px',
-                            width: 'fit-content', // Don't stretch full width, cleaner
-                            minWidth: '200px'
+                            padding: '4px',
+                            background: '#E2E8F0',
+                            borderRadius: '10px',
+                            marginBottom: '32px', // Increased separation
+                            width: '100%',
+                            boxSizing: 'border-box'
                         }}>
                             {[
                                 { id: 'images', label: 'Images' },
@@ -1408,31 +1452,31 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                         onClick={() => setReviewSubTab(type.id as 'images' | 'videos')}
                                         style={{
                                             flex: 1,
-                                            padding: '4px 12px',
-                                            borderRadius: '6px',
+                                            padding: '8px 0',
+                                            borderRadius: '8px',
                                             border: 'none',
                                             background: isActive ? '#fff' : 'transparent',
                                             color: isActive ? COLORS.text : COLORS.textSecondary,
-                                            fontSize: '11px',
-                                            fontWeight: isActive ? 700 : 500,
+                                            fontSize: '13px',
+                                            fontWeight: isActive ? 700 : 600,
                                             cursor: 'pointer',
                                             display: 'flex',
                                             alignItems: 'center',
                                             justifyContent: 'center',
-                                            gap: '6px',
-                                            boxShadow: isActive ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
-                                            transition: 'all 0.15s ease'
+                                            gap: '8px',
+                                            boxShadow: isActive ? '0 2px 4px rgba(0,0,0,0.06)' : 'none',
+                                            transition: 'all 0.2s cubic-bezier(0.2, 0.8, 0.2, 1)'
                                         }}
                                     >
                                         {type.label}
                                         <span style={{
                                             background: isActive ? COLORS.primary : 'rgba(0,0,0,0.1)',
                                             color: isActive ? '#fff' : COLORS.textSecondary,
-                                            padding: '1px 5px',
-                                            borderRadius: '4px',
-                                            fontSize: '9px',
+                                            padding: '2px 8px',
+                                            borderRadius: '12px',
+                                            fontSize: '11px',
                                             fontWeight: 700,
-                                            minWidth: '14px',
+                                            minWidth: '20px',
                                             textAlign: 'center'
                                         }}>
                                             {persistentReviews.filter(i => i.type === (type.id === 'images' ? 'image' : 'video')).length}
@@ -1446,8 +1490,9 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                         {persistentReviews.filter(i => i.type === (reviewSubTab === 'images' ? 'image' : 'video')).length > 0 ? (
                             <div style={{
                                 display: 'grid',
-                                gridTemplateColumns: 'repeat(4, 1fr)', // Keep 4 cols
-                                gap: '12px', // Increased gap for airiness
+                                gridTemplateColumns: 'repeat(3, 1fr)', // 3 columns for better thumbnail size
+                                gap: '16px', // Airy spacing
+                                alignContent: 'start'
                             }}>
                                 {persistentReviews
                                     .filter(item => item.type === (reviewSubTab === 'images' ? 'image' : 'video'))
@@ -1459,16 +1504,24 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 flexDirection: 'column',
                                 alignItems: 'center',
                                 justifyContent: 'center',
-                                padding: '60px 0',
+                                marginTop: '60px',
                                 color: COLORS.textMuted,
                                 opacity: 0.8
                             }}>
-                                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ marginBottom: '10px', opacity: 0.4 }}>
-                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                                    <polyline points="17 8 12 3 7 8" />
-                                    <line x1="12" y1="3" x2="12" y2="15" />
-                                </svg>
-                                <div style={{ fontSize: '12px', fontWeight: 500 }}>No {reviewSubTab} available</div>
+                                <div style={{
+                                    width: '64px', height: '64px', borderRadius: '50%',
+                                    background: COLORS.backgroundSecondary,
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    marginBottom: '16px'
+                                }}>
+                                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ opacity: 0.5 }}>
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                        <polyline points="17 8 12 3 7 8" />
+                                        <line x1="12" y1="3" x2="12" y2="15" />
+                                    </svg>
+                                </div>
+                                <div style={{ fontSize: '14px', fontWeight: 600, color: COLORS.textSecondary }}>No {reviewSubTab} found</div>
+                                <div style={{ fontSize: '12px', marginTop: '4px' }}>Try exploring other variants</div>
                             </div>
                         )}
                     </div>
@@ -2284,6 +2337,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
                 @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
                 @keyframes slideDown { from { transform: translateY(-100%); } to { transform: translateY(0); } }
+                @keyframes slideInRight { from { transform: translateX(100%); } to { transform: translateX(0); } }
             `}</style>
         </div >
     );
