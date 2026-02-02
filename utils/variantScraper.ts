@@ -65,11 +65,21 @@ function hydrateAllVariantImages(
     globalCache: Record<string, string[]>
 ) {
     allAsins.forEach(asin => {
-        if (asinToImages[asin] && asinToImages[asin].length >= 5) return;
-
-        if (globalCache[asin] && globalCache[asin].length > 0) {
-            asinToImages[asin] = [...globalCache[asin]];
-            return;
+        const cached = globalCache[asin];
+        if (cached && cached.length > 0) {
+            if (!asinToImages[asin]) {
+                asinToImages[asin] = [...cached];
+            } else {
+                // Merge cached images to ensure we have the most complete set
+                const existing = asinToImages[asin];
+                const existingSet = new Set(existing);
+                cached.forEach(url => {
+                    if (!existingSet.has(url)) {
+                        existing.push(url);
+                        existingSet.add(url);
+                    }
+                });
+            }
         }
 
         if (!asinToImages[asin]) {
@@ -370,49 +380,11 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
             }
         }
 
-        // ImageBlockATF (Usually specific to current variant, but verifying)
-        if (content.includes('ImageBlockATF') && currentAsin) {
-            let extractedMatches: string[] = [];
-            const hiResMatches = content.match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/g);
-            if (hiResMatches && hiResMatches.length > 0) {
-                extractedMatches = hiResMatches
-                    .map(m => {
-                        const raw = m.match(/"(https:\/\/[^"]+)"/)?.[1];
-                        return raw ? maximizeImageQuality(raw) : undefined;
-                    })
-                    .filter((u): u is string => !!u);
-            }
-            // Fallback
-            const largeMatches = content.match(/"(?:large|main)"\s*:\s*"(https:\/\/[^"]+)"/g);
-            if (largeMatches) {
-                const candidates = largeMatches
-                    .map(m => m.match(/"(https:\/\/[^"]+)"/)?.[1])
-                    .filter((u): u is string => !!u)
-                    .map(u => maximizeImageQuality(u));
-
-                if (candidates.length > extractedMatches.length) {
-                    extractedMatches = candidates;
-                }
-            }
-
-            if (extractedMatches.length > 0) {
-                if (asinToImages[currentAsin]) {
-                    // MERGE, don't overwrite!
-                    const existingSet = new Set(asinToImages[currentAsin]);
-                    extractedMatches.forEach(url => {
-                        const core = getImageCoreId(url);
-                        // We check core ID to strictly dedupe, but we push the URL only if exact url isn't there? 
-                        // Actually, asinToImages stores URLs. Let's just check URL presence for simplicity or core ID if we want to be strict.
-                        if (!existingSet.has(url)) {
-                            asinToImages[currentAsin].push(url);
-                            existingSet.add(url);
-                        }
-                    });
-                } else {
-                    asinToImages[currentAsin] = extractedMatches;
-                }
-            }
-        }
+        // REMOVED: ImageBlockATF scraping.
+        // This script block is static and often persists from the initial page load even after AJAX variant switches.
+        // Using it causes the "initial variant" images to be assigned to the "current active variant" 
+        // incorrectly, leading to cache poisoning/bleed-over.
+        // We now rely strictly on 'imageGalleryData', 'colorImages', and the live DOM which are more reliable.
     });
 
     /* ========= MAP COLOR → ASIN ========= */
@@ -458,6 +430,33 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
                 // If NO overlap, the DOM is likely lagging behind the ASIN switch.
                 // We should NOT use these images as they likely belong to the previous variant.
                 isFreshDataValid = false;
+            }
+        } else if (knownScriptImages.length === 0 && freshImages.length > 0) {
+            // CRITICAL: If we have NO script data for the current ASIN, we must be paranoid.
+            // Check if these fresh images belong to ANY OTHER known variant. 
+            // If they match another variant's set strictly, they are likely STALE DOM artefacts (Lag).
+            const freshIds = freshImages.map(u => getImageCoreId(u));
+            const freshMainId = freshIds[0];
+
+            for (const otherAsin of Object.keys(asinToImages)) {
+                if (otherAsin === currentAsin) continue;
+                const otherImages = asinToImages[otherAsin];
+                if (otherImages && otherImages.length > 0) {
+                    const otherIds = new Set(otherImages.map(u => getImageCoreId(u)));
+
+                    // HEURISTIC 1: If the Main Image (first one) matches an existing variant's main image, it's stale.
+                    if (otherIds.has(freshMainId)) {
+                        isFreshDataValid = false;
+                        break;
+                    }
+
+                    // HEURISTIC 2: If ALL fresh images are contained in another variant's set
+                    const allMatch = freshIds.every(id => otherIds.has(id));
+                    if (allMatch) {
+                        isFreshDataValid = false;
+                        break;
+                    }
+                }
             }
         }
 
@@ -533,15 +532,26 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
     ]);
 
     // RESTORE FROM FULL GALLERY CACHE:
-    // If we have "better" data in our authoritative cache than what we scraped this run, use it.
-    // We strictly Prefer the "Gold Standard" cache if available to prevent "additional images" (duplicates)
-    // from inferior sources like ImageBlockATF or DOM merging.
+    // We merge the authoritative data into our current set. 
+    // This ensures we get the "Gold Standard" high-res links, but we ALSO keep any valid extra images
+    // possibly found by the dynamic DOM scrape that might be missing from the static script data.
     Object.keys(fullGalleryCache).forEach(asin => {
         if (allVariantAsins.has(asin)) {
             const cached = fullGalleryCache[asin];
-            // If we have authoritative data, use it. Even if 'current' is longer (which implies duplicates/junk).
+            // If cache exists, merge it in.
             if (cached && cached.length > 0) {
-                asinToImages[asin] = cached;
+                if (!asinToImages[asin]) {
+                    asinToImages[asin] = [...cached];
+                } else {
+                    const existing = asinToImages[asin];
+                    const existingSet = new Set(existing);
+                    cached.forEach(url => {
+                        if (!existingSet.has(url)) {
+                            existing.push(url);
+                            existingSet.add(url);
+                        }
+                    });
+                }
             }
         }
     });
@@ -609,6 +619,36 @@ export function scrapeVariants(isHovering: boolean = false): VariantItem[] {
 
     // Don't need hydration for videos anymore as we did it inline, but keeping safety check
     hydrateAllVariantVideos(variants, globalVideoCache);
+
+    // CLEANUP: Detect and purge cache collisions to prevent future poisoning
+    // If multiple ASINs map to the EXACT same image set in the cache, it's likely a poisoning error.
+    const reverseMap: Record<string, string[]> = {};
+    Object.keys(globalCache).forEach(asin => {
+        if (!globalCache[asin] || globalCache[asin].length === 0) return;
+        const signature = globalCache[asin].map(u => getImageCoreId(u)).sort().join('|');
+        if (reverseMap[signature]) {
+            // Collision detected! 
+            // Only keeping the one that matches our currently reliable sources (like colorToAsin or currentAsin)
+            // If unknown, we might have to purge both or keep the one that matches dimension data.
+            // For safety, if we find the current active ASIN in a collision, we trust the CURRENT scrape and purge the others.
+            reverseMap[signature].push(asin);
+        } else {
+            reverseMap[signature] = [asin];
+        }
+    });
+
+    Object.values(reverseMap).forEach(asins => {
+        if (asins.length > 1) {
+            // We have multiple ASINs having identical image sets. This is wrong 99% of the time for this product.
+            // We keep the one that matches the current authoritative scrape (if any) and nuke the rest.
+            const validAsin = asins.find(a => asinToImages[a] && asinToImages[a].length > 0);
+            asins.forEach(a => {
+                if (a !== validAsin) {
+                    delete globalCache[a]; // Purge bad cache
+                }
+            });
+        }
+    });
 
     return variants;
 }

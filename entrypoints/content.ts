@@ -68,7 +68,25 @@ export default defineContentScript({
                         // @ts-ignore
                         if (window._amzVideoCache) window._amzVideoCache = {};
 
+                        // CRITICAL FIX: Reset Global Variants Cache on Navigation
+                        // This ensures we scrape fresh images for new variants and don't reuse old ones (bleed-over fix)
+                        // @ts-ignore
+                        if (window._amzImageCache) window._amzImageCache = {};
+                        // @ts-ignore
+                        if (window._amzFullGalleryCache) window._amzFullGalleryCache = {};
+
+
+                        // CRITICAL FIX: Reset Review Media Prefetch
+                        // When navigating back/forward (SPA), we must clear old product's review data
+                        // and explicitly fetch for the new one.
+                        prefetchedAsin = '';
+                        prefetchedReviewImages = [];
+                        prefetchedReviewVideos = [];
+
                         notifyContentChange('product_changed');
+
+                        // Re-trigger prefetch for the new ASIN immediately
+                        prefetchReviewMedia();
                     }
                 }
             }, 1000);
@@ -1855,6 +1873,8 @@ export default defineContentScript({
 
                 // Helper to determine if a video is a customer review video based on context
                 // COMPREHENSIVE: Capture ALL customer review videos reliably
+                // Helper to determine if a video is a customer review video based on context
+                // COMPREHENSIVE: Capture ALL customer review videos reliably
                 function isReviewVideoContext(content: string, url: string): boolean {
                     const lowerContent = content.toLowerCase();
                     const lowerUrl = url.toLowerCase();
@@ -1895,84 +1915,12 @@ export default defineContentScript({
                         return true;
                     }
 
-                    // Check context around the URL for review markers
-                    const urlIndex = content.indexOf(url);
-                    if (urlIndex > 0) {
-                        const context = content.substring(
-                            Math.max(0, urlIndex - 600),
-                            Math.min(content.length, urlIndex + 600)
-                        ).toLowerCase();
-
-                        // Context patterns that indicate customer review video
-                        const reviewContextPatterns = [
-                            'customerreview',
-                            'customer-review',
-                            'customer_review',
-                            'reviewvideo',
-                            'review-video',
-                            'review_video',
-                            'usergeneratedcontent',
-                            'user-generated-content',
-                            'user_generated_content',
-                            'ugcvideo',
-                            'ugc-video',
-                            'ugc_video',
-                            'cm_cr-review',
-                            'cm_cr_review',
-                            'crwidget',
-                            'cr-widget',
-                            'cr-media',
-                            'customerimages',
-                            'customer-images',
-                            'reviewmedia',
-                            'review-media',
-                            'perfect',
-                            'shade',
-                            'quality',
-                            'texture',
-                            'scent',
-                            'size',
-                            'fit',
-                            'color',
-                            'verified',
-                            'purchase',
-                            'reviewer',
-                            'stars',
-                            '"mediatype":"video"',
-                            '"type":"review"',
-                            '"reviewid"'
-                        ];
-
-                        const hasReviewContext = reviewContextPatterns.some(pattern => context.includes(pattern));
-
-                        // MUST NOT have product/gallery video context
-                        const productVideoContextPatterns = [
-                            'productvideo',
-                            'product-video',
-                            'product_video',
-                            'galleryvideo',
-                            'gallery-video',
-                            'gallery_video',
-                            'mainvideo',
-                            'main-video',
-                            'main_video',
-                            'imageblock',
-                            'image-block',
-                            'altimages',
-                            'alt-images',
-                            'colorimages',
-                            'color-images',
-                            'ivmain',
-                            'iv-main'
-                        ];
-
-                        const hasProductVideoContext = productVideoContextPatterns.some(pattern => context.includes(pattern));
-
-                        // Return true if we have review context and NO product video context
-                        if (hasReviewContext && !hasProductVideoContext) {
-                            return true;
-                        }
-                    }
+                    // REMOVED: Text-based context scanning (searching for 'review' keywords near the URL).
+                    // This was too aggressive and caused false positives (e.g. picking up related videos).
+                    // We now rely on:
+                    // 1. Explicit Review Data Blocks (customerVideos, reviewImages, etc.)
+                    // 2. Strict DOM Scoping (videos inside #customer-reviews)
+                    // 3. URLs that explicitly say "customer-review"
 
                     return false;
                 }
