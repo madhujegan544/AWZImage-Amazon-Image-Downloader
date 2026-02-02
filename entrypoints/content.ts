@@ -45,6 +45,11 @@ export default defineContentScript({
         let refreshDebounceTimer: ReturnType<typeof setTimeout> | null = null;
         let navigationCheckInterval: ReturnType<typeof setInterval> | null = null;
         let isHoveringVariant = false; // Moved to global scope for scraper access
+        // Stable product-level ASIN used for review media.
+        // This is initialized once per product page and is NOT updated
+        // when the selected variant changes, so review media stays
+        // common across all variants of the same product.
+        let productReviewAsin = '';
 
         // Poll for URL/ASIN changes (handle SPA navigation)
         function startNavigationListener() {
@@ -62,6 +67,8 @@ export default defineContentScript({
                     if (currentAsin && currentAsin !== lastAsin) {
                         console.log('AMZImage: Navigation detected', { from: lastAsin, to: currentAsin });
                         lastAsin = currentAsin;
+                        // Update stable product-level ASIN for the new product
+                        productReviewAsin = currentAsin;
                         lastMainImageSrc = ''; // Reset so we detect new images
 
                         // Clear video cache to prevent stale videos from previous product
@@ -292,6 +299,21 @@ export default defineContentScript({
             return '';
         }
 
+        // Get a stable, product-level ASIN for review media.
+        // This is initialized once per product and kept constant across
+        // variant switches so that review media is common for all variants.
+        function getProductReviewAsin(): string {
+            if (productReviewAsin) return productReviewAsin;
+
+            const current = getCurrentAsin();
+            if (current) {
+                productReviewAsin = current;
+                return current;
+            }
+
+            return '';
+        }
+
         // Watch for variant/image changes using MutationObserver
         function setupVariantObserver() {
             // Track mouse interactions on twister/variants
@@ -438,13 +460,15 @@ export default defineContentScript({
         // Prefetch cache for review media
         let prefetchedReviewImages: string[] = [];
         let prefetchedReviewVideos: string[] = [];
+        // Track which *product-level* ASIN we prefetched for.
+        // This should not change when only the variant changes.
         let prefetchedAsin = '';
 
         // Preemptively fetch review media as soon as page loads
         async function prefetchReviewMedia() {
-            const asin = getCurrentAsin();
+            const asin = getProductReviewAsin();
             if (!asin || !isProductPage()) return;
-            if (asin === prefetchedAsin) return; // Already fetched for this ASIN
+            if (asin === prefetchedAsin) return; // Already fetched for this product
 
             console.log('AMZImage: Prefetching review media for', asin);
             prefetchedAsin = asin;
@@ -1374,12 +1398,17 @@ export default defineContentScript({
                 });
             }
 
-            // Extract ASIN from URL or page (for product pages)
-            let asin = getCurrentAsin();
+            // Extract stable, product-level ASIN (for product pages)
+            // This is intentionally de-coupled from the currently selected
+            // variant so that review media is common across all variants.
+            let asin = getProductReviewAsin();
             if (!asin) {
                 const asinElement = document.querySelector('[data-asin]');
                 if (asinElement) {
                     asin = asinElement.getAttribute('data-asin') || '';
+                    if (asin && !productReviewAsin) {
+                        productReviewAsin = asin;
+                    }
                 }
             }
 
@@ -1546,217 +1575,210 @@ export default defineContentScript({
                 console.log(`AMZImage: Found ${productImages.length} unique product images`);
 
                 // ==========================================
-                // REVIEW IMAGES - Comprehensive extraction from embedded JSON data
-                // No scrolling required - all data available on page load
+                // REVIEW IMAGES & VIDEOS - Fetch EVERYTHING UPFRONT (No Scroll Needed)
+                // This block runs ONLY on the initial, scroll-triggered scrape (triggerScroll === true)
+                // so that all review media is fetched and rendered upfront and will NOT change
+                // later due to user scrolling or further DOM mutations.
                 // ==========================================
+                if (triggerScroll) {
+                    const imageScripts = document.querySelectorAll('script:not([src])');
 
-                const imageScripts = document.querySelectorAll('script:not([src])');
-                // REVIEW IMAGES - Comprehensive extraction from embedded JSON data
-                // No scrolling required - all data available on page load
-                // ==========================================
+                    // 1. PRIMARY: Extract review images from ALL embedded script data present on page load
+                    imageScripts.forEach(script => {
+                        const content = script.textContent || '';
+                        if (!content || content.length < 50) return;
 
-                // 1. PRIMARY: Extract review images from ALL embedded script data
-                // Amazon embeds review media data in multiple script tags on page load
-                imageScripts.forEach(script => {
-                    const content = script.textContent || '';
-                    if (!content || content.length < 50) return;
+                        const lowerContent = content.toLowerCase();
 
-                    const lowerContent = content.toLowerCase();
-
-                    // =====================================================
-                    // PATTERN GROUP 1: Review-specific data structures
-                    // These are the most reliable sources for review images
-                    // =====================================================
-
-                    // Pattern 1a: Customer images array in review data
-                    const customerImagesMatch = content.match(/"customerImages"\s*:\s*\[(.*?)\]/gs);
-                    if (customerImagesMatch) {
-                        customerImagesMatch.forEach(match => {
-                            const urls = match.match(/https:\/\/[^"'\s,\]\[]+\.(jpg|jpeg|png|webp)[^"'\s,\]\[]*/gi);
-                            if (urls) {
-                                urls.forEach(url => {
-                                    url = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                    addUniqueReviewImage(url);
-                                });
-                            }
-                        });
-                    }
-
-                    // Pattern 1b: Review images array
-                    const reviewImagesMatch = content.match(/"reviewImages"\s*:\s*\[(.*?)\]/gs);
-                    if (reviewImagesMatch) {
-                        reviewImagesMatch.forEach(match => {
-                            const urls = match.match(/https:\/\/[^"'\s,\]\[]+\.(jpg|jpeg|png|webp)[^"'\s,\]\[]*/gi);
-                            if (urls) {
-                                urls.forEach(url => {
-                                    url = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                    addUniqueReviewImage(url);
-                                });
-                            }
-                        });
-                    }
-
-                    // Pattern 1c: Customer media gallery data
-                    const mediaGalleryMatch = content.match(/"customerMediaGallery"\s*:\s*\{([\s\S]*?)\}/g);
-                    if (mediaGalleryMatch) {
-                        mediaGalleryMatch.forEach(match => {
-                            const urls = match.match(/https:\/\/[^"'\s,\]\[\}]+\.(jpg|jpeg|png|webp)[^"'\s,\]\[\}]*/gi);
-                            if (urls) {
-                                urls.forEach(url => {
-                                    url = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                    addUniqueReviewImage(url);
-                                });
-                            }
-                        });
-                    }
-
-                    // Pattern 1d: Media customer reviews
-                    const mediaReviewsMatch = content.match(/"mediaCustomerReviews"\s*:\s*\[(.*?)\]/gs);
-                    if (mediaReviewsMatch) {
-                        mediaReviewsMatch.forEach(match => {
-                            const urls = match.match(/https:\/\/[^"'\s,\]\[]+\.(jpg|jpeg|png|webp)[^"'\s,\]\[]*/gi);
-                            if (urls) {
-                                urls.forEach(url => {
-                                    url = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                    addUniqueReviewImage(url);
-                                });
-                            }
-                        });
-                    }
-
-                    // =====================================================
-                    // PATTERN GROUP 2: CM_CR (Customer Review) data blocks
-                    // Amazon's primary customer review data structure
-                    // =====================================================
-
-                    // Pattern 2a: CM_CR image URLs
-                    if (lowerContent.includes('cm_cr') || lowerContent.includes('cr-media')) {
-                        const crImageUrls = content.match(/https:\/\/[^"'\s,\]\[]+(?:cm_cr|cr-media|customer)[^"'\s,\]\[]*\.(jpg|jpeg|png|webp)[^"'\s,\]\[]*/gi);
-                        if (crImageUrls) {
-                            crImageUrls.forEach(url => {
-                                url = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                addUniqueReviewImage(url);
-                            });
-                        }
-                    }
-
-                    // Pattern 2b: CR widget data
-                    if (lowerContent.includes('crwidget') || lowerContent.includes('cr-widget')) {
-                        const widgetImageUrls = content.match(/"(?:imageUrl|mediaUrl|thumbnailUrl|largeImageUrl)"\s*:\s*"(https:\/\/[^"]+)"/gi);
-                        if (widgetImageUrls) {
-                            widgetImageUrls.forEach(match => {
-                                const urlMatch = match.match(/"(https:\/\/[^"]+)"/);
-                                if (urlMatch && urlMatch[1]) {
-                                    const url = urlMatch[1].replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                    if (url.match(/\.(jpg|jpeg|png|webp)/i)) {
+                        // Pattern group 1: explicit review image structures
+                        const customerImagesMatch = content.match(/"customerImages"\s*:\s*\[(.*?)\]/gs);
+                        if (customerImagesMatch) {
+                            customerImagesMatch.forEach(match => {
+                                const urls = match.match(/https:\/\/[^"'\s,\]\[]+\.(jpg|jpeg|png|webp)[^"'\s,\]\[]*/gi);
+                                if (urls) {
+                                    urls.forEach(url => {
+                                        url = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
                                         addUniqueReviewImage(url);
-                                    }
+                                    });
                                 }
                             });
                         }
-                    }
 
-                    // =====================================================
-                    // PATTERN GROUP 3: Review block data with images
-                    // =====================================================
-
-                    // Pattern 3a: Individual review objects with images property
-                    const reviewObjectMatches = content.match(/\{[^{}]*"reviewId"[^{}]*"images"\s*:\s*\[[^\]]*\][^{}]*\}/g);
-                    if (reviewObjectMatches) {
-                        reviewObjectMatches.forEach(reviewObj => {
-                            const urls = reviewObj.match(/https:\/\/[^"'\s,\]\[\}]+\.(jpg|jpeg|png|webp)[^"'\s,\]\[\}]*/gi);
-                            if (urls) {
-                                urls.forEach(url => {
-                                    url = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                    addUniqueReviewImage(url);
-                                });
-                            }
-                        });
-                    }
-
-                    // Pattern 3c: Waffle/Titan widget data (modern Amazon review gallery)
-                    const waffleMatch = content.match(/"waffleConfig"\s*:\s*\{([\s\S]*?)\}/g);
-                    if (waffleMatch) {
-                        waffleMatch.forEach(match => {
-                            const urls = match.match(/https:\/\/[^"'\s,\]\[\}]+\.(jpg|jpeg|png|webp)[^"'\s,\]\[\}]*/gi);
-                            if (urls) {
-                                urls.forEach(url => {
-                                    url = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                    addUniqueReviewImage(url);
-                                });
-                            }
-                        });
-                    }
-
-                    // Pattern 3d: Review Image Gallery Data
-                    const reviewGalleryMatch = content.match(/ReviewImageGalleryData\s*:\s*(\[[\s\S]*?\])/i);
-                    if (reviewGalleryMatch) {
-                        try {
-                            const galleryData = JSON.parse(reviewGalleryMatch[1].replace(/'/g, '"'));
-                            galleryData.forEach((item: any) => {
-                                const url = item.hiResUrl || item.largeUrl || item.url || '';
-                                if (url) addUniqueReviewImage(url);
-                            });
-                        } catch (e) { }
-                    }
-
-                    // Pattern 3e: Review Media Gallery Popover Data (Most comprehensive source)
-                    const popoverMatch = content.match(/"cr-media-gallery-popover-data"\s*:\s*(\{[\s\S]*?\})\s*,/);
-                    if (popoverMatch) {
-                        try {
-                            const popoverData = JSON.parse(popoverMatch[1].replace(/'/g, '"'));
-                            if (popoverData.mediaList && Array.isArray(popoverData.mediaList)) {
-                                popoverData.mediaList.forEach((item: any) => {
-                                    if (item.image) {
-                                        const url = item.image.hiRes || item.image.large || item.image.url || '';
-                                        if (url) addUniqueReviewImage(url);
-                                    }
-                                    if (item.video) {
-                                        const videoUrl = item.video.url || item.video.progressiveUrl || '';
-                                        if (videoUrl) addReviewVideo(videoUrl);
-                                    }
-                                });
-                            }
-                        } catch (e) { }
-                    }
-
-                    // Pattern 3f: Review Images Reel/Carousel Data
-                    const reelMatch = content.match(/window\.reviewMediaReel\s*=\s*(\[[\s\S]*?\]);/);
-                    if (reelMatch) {
-                        try {
-                            const reelData = JSON.parse(reelMatch[1].replace(/'/g, '"'));
-                            reelData.forEach((item: any) => {
-                                const url = item.hiResUrl || item.url || '';
-                                if (url) addUniqueReviewImage(url);
-                                if (item.videoUrl) addReviewVideo(item.videoUrl);
-                            });
-                        } catch (e) { }
-                    }
-
-                    // =====================================================
-                    // PATTERN GROUP 4: Image URLs with review context markers
-                    // Fallback patterns for edge cases
-                    // =====================================================
-
-                    // Only if this script contains review-related content
-                    if (lowerContent.includes('review') || lowerContent.includes('customer')) {
-                        // Pattern 4a: Image URLs near review context
-                        const allImageUrls = content.match(/"(https:\/\/[^"]+\.(jpg|jpeg|png|webp))"(?=[^"]*(?:review|customer|rating))/gi);
-                        if (allImageUrls) {
-                            allImageUrls.forEach(match => {
-                                const urlMatch = match.match(/"(https:\/\/[^"]+)"/);
-                                if (urlMatch && urlMatch[1]) {
-                                    const url = urlMatch[1].replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                    // Additional check - must look like customer content
-                                    if (isCustomerReviewImage(url, null)) {
+                        const reviewImagesMatch = content.match(/"reviewImages"\s*:\s*\[(.*?)\]/gs);
+                        if (reviewImagesMatch) {
+                            reviewImagesMatch.forEach(match => {
+                                const urls = match.match(/https:\/\/[^"'\s,\]\[]+\.(jpg|jpeg|png|webp)[^"'\s,\]\[]*/gi);
+                                if (urls) {
+                                    urls.forEach(url => {
+                                        url = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
                                         addUniqueReviewImage(url);
-                                    }
+                                    });
                                 }
                             });
                         }
-                    }
-                });
 
+                        const mediaGalleryMatch = content.match(/"customerMediaGallery"\s*:\s*\{([\s\S]*?)\}/g);
+                        if (mediaGalleryMatch) {
+                            mediaGalleryMatch.forEach(match => {
+                                const urls = match.match(/https:\/\/[^"'\s,\]\[\}]+\.(jpg|jpeg|png|webp)[^"'\s,\]\[\}]*/gi);
+                                if (urls) {
+                                    urls.forEach(url => {
+                                        url = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
+                                        addUniqueReviewImage(url);
+                                    });
+                                }
+                            });
+                        }
+
+                        const mediaReviewsMatch = content.match(/"mediaCustomerReviews"\s*:\s*\[(.*?)\]/gs);
+                        if (mediaReviewsMatch) {
+                            mediaReviewsMatch.forEach(match => {
+                                const urls = match.match(/https:\/\/[^"'\s,\]\[]+\.(jpg|jpeg|png|webp)[^"'\s,\]\[]*/gi);
+                                if (urls) {
+                                    urls.forEach(url => {
+                                        url = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
+                                        addUniqueReviewImage(url);
+                                    });
+                                }
+                            });
+                        }
+
+                        // CM_CR / widget-based review image data
+                        if (lowerContent.includes('cm_cr') || lowerContent.includes('cr-media')) {
+                            const crImageUrls = content.match(/https:\/\/[^"'\s,\]\[]+(?:cm_cr|cr-media|customer)[^"'\s,\]\[]*\.(jpg|jpeg|png|webp)[^"'\s,\]\[]*/gi);
+                            if (crImageUrls) {
+                                crImageUrls.forEach(url => {
+                                    url = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
+                                    addUniqueReviewImage(url);
+                                });
+                            }
+                        }
+
+                        if (lowerContent.includes('crwidget') || lowerContent.includes('cr-widget')) {
+                            const widgetImageUrls = content.match(/"(?:imageUrl|mediaUrl|thumbnailUrl|largeImageUrl)"\s*:\s*"(https:\/\/[^"]+)"/gi);
+                            if (widgetImageUrls) {
+                                widgetImageUrls.forEach(match => {
+                                    const urlMatch = match.match(/"(https:\/\/[^"]+)"/);
+                                    if (urlMatch && urlMatch[1]) {
+                                        const url = urlMatch[1].replace(/\\u002F/g, '/').replace(/\\/g, '');
+                                        if (url.match(/\.(jpg|jpeg|png|webp)/i)) {
+                                            addUniqueReviewImage(url);
+                                        }
+                                    }
+                                });
+                            }
+                        }
+
+                        // Additional review gallery structures
+                        const reviewObjectMatches = content.match(/\{[^{}]*"reviewId"[^{}]*"images"\s*:\s*\[[^\]]*\][^{}]*\}/g);
+                        if (reviewObjectMatches) {
+                            reviewObjectMatches.forEach(reviewObj => {
+                                const urls = reviewObj.match(/https:\/\/[^"'\s,\]\[\}]+\.(jpg|jpeg|png|webp)[^"'\s,\]\[\}]*/gi);
+                                if (urls) {
+                                    urls.forEach(url => {
+                                        url = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
+                                        addUniqueReviewImage(url);
+                                    });
+                                }
+                            });
+                        }
+
+                        const reviewGalleryMatch = content.match(/ReviewImageGalleryData\s*:\s*(\[[\s\S]*?\])/i);
+                        if (reviewGalleryMatch) {
+                            try {
+                                const galleryData = JSON.parse(reviewGalleryMatch[1].replace(/'/g, '"'));
+                                galleryData.forEach((item: any) => {
+                                    const url = item.hiResUrl || item.largeUrl || item.url || '';
+                                    if (url) addUniqueReviewImage(url);
+                                });
+                            } catch { }
+                        }
+
+                        const popoverMatch = content.match(/"cr-media-gallery-popover-data"\s*:\s*(\{[\s\S]*?\})\s*,/);
+                        if (popoverMatch) {
+                            try {
+                                const popoverData = JSON.parse(popoverMatch[1].replace(/'/g, '"'));
+                                if (popoverData.mediaList && Array.isArray(popoverData.mediaList)) {
+                                    popoverData.mediaList.forEach((item: any) => {
+                                        if (item.image) {
+                                            const url = item.image.hiRes || item.image.large || item.image.url || '';
+                                            if (url) addUniqueReviewImage(url);
+                                        }
+                                        if (item.video) {
+                                            const videoUrl = item.video.url || item.video.progressiveUrl || '';
+                                            if (videoUrl) addReviewVideo(videoUrl);
+                                        }
+                                    });
+                                }
+                            } catch { }
+                        }
+
+                        const reelMatch = content.match(/window\.reviewMediaReel\s*=\s*(\[[\s\S]*?\]);/);
+                        if (reelMatch) {
+                            try {
+                                const reelData = JSON.parse(reelMatch[1].replace(/'/g, '"'));
+                                reelData.forEach((item: any) => {
+                                    const url = item.hiResUrl || item.url || '';
+                                    if (url) addUniqueReviewImage(url);
+                                    if (item.videoUrl) addReviewVideo(item.videoUrl);
+                                });
+                            } catch { }
+                        }
+
+                        // Fallback: review-context image URLs
+                        if (lowerContent.includes('review') || lowerContent.includes('customer')) {
+                            const allImageUrls = content.match(/"(https:\/\/[^"]+\.(jpg|jpeg|png|webp))"(?=[^"]*(?:review|customer|rating))/gi);
+                            if (allImageUrls) {
+                                allImageUrls.forEach(match => {
+                                    const urlMatch = match.match(/"(https:\/\/[^"]+)"/);
+                                    if (urlMatch && urlMatch[1]) {
+                                        const url = urlMatch[1].replace(/\\u002F/g, '/').replace(/\\/g, '');
+                                        if (isCustomerReviewImage(url, null)) {
+                                            addUniqueReviewImage(url);
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    });
+
+                    console.log(`AMZImage: Found ${reviewImages.length} review images`);
+
+                    // ==========================================
+                    // VIDEO EXTRACTION - Product & Reviews (INITIAL LOAD ONLY)
+                    // ==========================================
+                    const seenAllVideoIds = new Set<string>();
+
+                    function getVideoId(url: string): string {
+                        try {
+                            const parsed = new URL(url);
+                            return parsed.pathname;
+                        } catch {
+                            return url.split('?')[0];
+                        }
+                    }
+
+                    function addProductVideo(url: string): boolean {
+                        if (!url || !url.startsWith('http')) return false;
+                        const videoId = getVideoId(url);
+                        if (!seenAllVideoIds.has(videoId)) {
+                            seenAllVideoIds.add(videoId);
+                            videos.push(url);
+                            return true;
+                        }
+                        return false;
+                    }
+
+                    function addReviewVideo(url: string): boolean {
+                        if (!url || !url.startsWith('http')) return false;
+                        const videoId = getVideoId(url);
+                        if (!seenAllVideoIds.has(videoId)) {
+                            seenAllVideoIds.add(videoId);
+                            reviewVideos.push(url);
+                            return true;
+                        }
+                        return false;
+                    }
                 // 2. DOM Scraping for Product Images (Fallback/Verification)
                 // Ensure what the user sees is also scraped, even if scripts fail
                 if (onProductPage) {
@@ -2356,41 +2378,56 @@ export default defineContentScript({
 
                 // No longer trigger scroll - data is fetched via silent API
 
-                // Background fetch across ALL pages (limit increased significantly)
-                // runs ONCE per ASIN change, regardless of triggerScroll
-                if (onProductPage && asin && asin !== lastFetchedReviewAsin) {
+                // Background fetch across ALL variant review pages (limit increased significantly)
+                // runs ONCE per *product* on initial load (triggerScroll=true).
+                // This builds a COMMON review media pool by merging review images/videos
+                // from every known variant ASIN for this product.
+                if (onProductPage && asin && asin !== lastFetchedReviewAsin && triggerScroll) {
                     lastFetchedReviewAsin = asin;
 
-                    // Run in background - DO NOT AWAIT
-                    fetchAllReviewMedia(asin, 100).then(extra => {
-                        let hasNewMedia = false;
-                        if (extra.images.length > 0) {
-                            extra.images.forEach(img => {
-                                const hi = toHighRes(img);
-                                const b = getImageBase(hi);
-                                if (!seenReviewBases.has(b)) {
-                                    seenReviewBases.add(b);
-                                    // Update global store so next scrape picks it up
-                                    prefetchedReviewImages.push(hi);
+                    // Build the set of ASINs whose review media we want to aggregate:
+                    // - The stable product-level ASIN
+                    // - Every variant ASIN discovered by scrapeVariants()
+                    const reviewAsinSet = new Set<string>();
+                    reviewAsinSet.add(asin);
+                    variants.forEach(v => {
+                        if (v.asin) {
+                            reviewAsinSet.add(v.asin);
+                        }
+                    });
+
+                    reviewAsinSet.forEach(reviewAsin => {
+                        // Run in background per ASIN - DO NOT AWAIT
+                        fetchAllReviewMedia(reviewAsin, 100).then(extra => {
+                            let hasNewMedia = false;
+                            if (extra.images.length > 0) {
+                                extra.images.forEach(img => {
+                                    const hi = toHighRes(img);
+                                    const b = getImageBase(hi);
+                                    if (!seenReviewBases.has(b)) {
+                                        seenReviewBases.add(b);
+                                        // Update global store so next scrape picks it up
+                                        prefetchedReviewImages.push(hi);
+                                        hasNewMedia = true;
+                                    }
+                                });
+                            }
+                            if (extra.videos.length > 0) {
+                                const newVideos = extra.videos.filter(v => !prefetchedReviewVideos.includes(v));
+                                if (newVideos.length > 0) {
+                                    prefetchedReviewVideos.push(...newVideos);
                                     hasNewMedia = true;
                                 }
-                            });
-                        }
-                        if (extra.videos.length > 0) {
-                            const newVideos = extra.videos.filter(v => !prefetchedReviewVideos.includes(v));
-                            if (newVideos.length > 0) {
-                                prefetchedReviewVideos.push(...newVideos);
-                                hasNewMedia = true;
                             }
-                        }
 
-                        // Notify panel that new review media was loaded
-                        if (hasNewMedia) {
-                            console.log('AMZImage: Background review fetch complete, notifying UI');
-                            notifyContentChange('review_media_loaded');
-                        }
-                    }).catch(e => {
-                        console.warn('AMZImage: Background review fetch failed', e);
+                            // Notify panel that new review media was loaded
+                            if (hasNewMedia) {
+                                console.log('AMZImage: Background review fetch complete for', reviewAsin);
+                                notifyContentChange('review_media_loaded');
+                            }
+                        }).catch(e => {
+                            console.warn('AMZImage: Background review fetch failed for', reviewAsin, e);
+                        });
                     });
                 }
 

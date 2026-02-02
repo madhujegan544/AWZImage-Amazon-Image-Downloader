@@ -619,48 +619,46 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
     // Reliable Persistent Reviews population with Caching by ASIN
     // Triggers whenever productData updates (via load or poll)
+    // IMPORTANT: This now ACCUMULATES review media for the product across
+    // all variant loads, instead of replacing it per-variant. The result is
+    // a COMMON review section shared by every variant.
     useEffect(() => {
         if (!productData?.asin) return;
         const currentAsin = productData.asin;
 
         // 1. Extract fresh reviews from current payload
         const freshReviews: MediaItem[] = [];
-        const added = new Set<string>();
+        const freshAdded = new Set<string>();
 
         (productData.reviewImages || []).forEach(url => {
-            if (url && !added.has(url)) {
+            if (url && !freshAdded.has(url)) {
                 freshReviews.push({ url, type: 'image', source: 'review', category: 'reviewImage' });
-                added.add(url);
+                freshAdded.add(url);
             }
         });
         (productData.reviewVideos || []).forEach(url => {
-            if (url && !added.has(url)) {
+            if (url && !freshAdded.has(url)) {
                 freshReviews.push({ url, type: 'video', source: 'review', category: 'reviewVideo' });
-                added.add(url);
+                freshAdded.add(url);
             }
         });
 
-        // 2. Update Cache if we found new data
-        if (freshReviews.length > 0) {
-            reviewCacheRef.current[currentAsin] = freshReviews;
-        }
+        // 2. Merge fresh data into cache to build a product-wide union
+        const existing = reviewCacheRef.current[currentAsin] || [];
+        const existingUrls = new Set(existing.map(i => i.url));
 
-        // 3. Set State from Cache (preferred) or Fresh
-        // This ensures that if we revisit a page and scrape fails/delays, we show cached data immediately.
-        const cachedReviews = reviewCacheRef.current[currentAsin] || [];
+        const merged: MediaItem[] = [...existing];
+        freshReviews.forEach(item => {
+            if (!existingUrls.has(item.url)) {
+                existingUrls.add(item.url);
+                merged.push(item);
+            }
+        });
 
-        // If we have cached data, use it (it might be richer if previous scrape got more)
-        // Or if fresh is better? Usually they should depend on scraping. 
-        // Let's rely on cache which accumulates or refreshing if fresh > 0.
-        // Actually best policy: if fresh found, overwrite cache (fresh is truth). If fresh empty, fallback to cache.
+        reviewCacheRef.current[currentAsin] = merged;
 
-        if (freshReviews.length > 0) {
-            setPersistentReviews(freshReviews);
-        } else if (cachedReviews.length > 0) {
-            setPersistentReviews(cachedReviews);
-        } else {
-            setPersistentReviews([]);
-        }
+        // 3. Expose the merged, product-wide review media as persistent state
+        setPersistentReviews(merged);
     }, [productData]);
 
 
@@ -1116,13 +1114,13 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginTop: 'auto', paddingTop: '4px' }}>
                         <span style={{
-                            fontSize: '9px',
-                            fontWeight: 500,
-                            color: COLORS.textMuted,
+                            fontSize: '10px',
+                            fontWeight: 600,
+                            color: COLORS.textSecondary,
                             background: COLORS.backgroundSecondary,
-                            padding: '2px 6px',
+                            padding: '3px 8px',
                             borderRadius: '4px',
-                            letterSpacing: '0.2px'
+                            letterSpacing: '0.3px'
                         }}>{product.asin}</span>
 
                         <button
@@ -1329,10 +1327,10 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     {/* Header Action Bar - Two Row Structure */}
                     {/* Header Action Bar - Two Row Structure */}
                     <div style={{
-                        padding: '28px 24px 20px 24px', // More balanced vertical spacing
+                        padding: '16px 20px 12px 20px', // Compact padding
                         display: 'flex',
                         flexDirection: 'column',
-                        gap: '14px',
+                        gap: '10px', // Tighter gap
                         borderBottom: `1px solid ${COLORS.borderLight}`,
                         background: COLORS.surface,
                         zIndex: 2,
@@ -1423,7 +1421,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
                     {/* Content Area */}
                     <div style={{
-                        padding: '24px', // Uniform padding
+                        padding: '16px', // Compact uniform padding
                         overflowY: 'auto',
                         flex: 1,
                         backgroundColor: COLORS.background, // Distinct background
@@ -1431,15 +1429,18 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                         flexDirection: 'column'
                     }}>
 
-                        {/* Segmented Control - Full Width & Balanced */}
+                        {/* Segmented Control - Full Width & Balanced (Sticky Header in Review Drawer) */}
                         <div style={{
                             display: 'flex',
                             padding: '4px',
                             background: '#E2E8F0',
                             borderRadius: '10px',
-                            marginBottom: '32px', // Increased separation
+                            marginBottom: '16px', // Compact separation
                             width: '100%',
-                            boxSizing: 'border-box'
+                            boxSizing: 'border-box',
+                            position: 'sticky',
+                            top: 0,
+                            zIndex: 3
                         }}>
                             {[
                                 { id: 'images', label: 'Images' },
@@ -1490,8 +1491,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                         {persistentReviews.filter(i => i.type === (reviewSubTab === 'images' ? 'image' : 'video')).length > 0 ? (
                             <div style={{
                                 display: 'grid',
-                                gridTemplateColumns: 'repeat(3, 1fr)', // 3 columns for better thumbnail size
-                                gap: '16px', // Airy spacing
+                                gridTemplateColumns: 'repeat(3, 1fr)', // 3 columns for larger thumbnails
+                                gap: '10px', // Tighter spacing
                                 alignContent: 'start'
                             }}>
                                 {persistentReviews
@@ -1582,19 +1583,35 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             className="variant-card"
                             title="Click to preview variant"
                             style={{
-                                background: COLORS.surface,
+                                background: selectingVariant && isCurrent
+                                    ? 'linear-gradient(135deg, #F5F3FF 0%, #FFFFFF 100%)'
+                                    : COLORS.surface,
                                 borderRadius: '12px',
-                                border: isCurrent ? `1.5px solid ${COLORS.primary}` : `1px solid ${COLORS.borderLight}`,
+                                border: isCurrent ? `2px solid ${COLORS.primary}` : `1px solid ${COLORS.borderLight}`,
                                 padding: '12px',
                                 cursor: selectingVariant ? 'wait' : 'pointer',
-                                transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+                                transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
                                 boxShadow: isCurrent ? COLORS.shadowPrimary : '0 1px 3px rgba(0,0,0,0.05)',
                                 position: 'relative',
                                 overflow: 'hidden',
                                 display: 'flex',
                                 flexDirection: 'column',
                                 gap: '4px',
-                                boxSizing: 'border-box'
+                                boxSizing: 'border-box',
+                                transform: selectingVariant && isCurrent ? 'scale(0.98)' : 'scale(1)',
+                                opacity: selectingVariant && !isCurrent ? 0.6 : 1
+                            }}
+                            onMouseEnter={(e) => {
+                                if (!selectingVariant && !isCurrent) {
+                                    e.currentTarget.style.transform = 'translateY(-2px)';
+                                    e.currentTarget.style.boxShadow = '0 4px 12px rgba(0,0,0,0.08)';
+                                }
+                            }}
+                            onMouseLeave={(e) => {
+                                if (!isCurrent) {
+                                    e.currentTarget.style.transform = 'translateY(0)';
+                                    e.currentTarget.style.boxShadow = '0 1px 3px rgba(0,0,0,0.05)';
+                                }
                             }}
                         >
                             <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
