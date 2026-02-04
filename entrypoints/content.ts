@@ -1380,6 +1380,37 @@ export default defineContentScript({
                 reviewVideos.push(...prefetchedReviewVideos);
             }
 
+            // Helper functions for video extraction
+            const seenAllVideoIds = new Set<string>();
+            function getVideoId(url: string): string {
+                try {
+                    const parsed = new URL(url);
+                    return parsed.pathname;
+                } catch {
+                    return url.split('?')[0];
+                }
+            }
+            function addProductVideo(url: string): boolean {
+                if (!url || !url.startsWith('http')) return false;
+                const videoId = getVideoId(url);
+                if (!seenAllVideoIds.has(videoId)) {
+                    seenAllVideoIds.add(videoId);
+                    videos.push(url);
+                    return true;
+                }
+                return false;
+            }
+            function addReviewVideo(url: string): boolean {
+                if (!url || !url.startsWith('http')) return false;
+                const videoId = getVideoId(url);
+                if (!seenAllVideoIds.has(videoId)) {
+                    seenAllVideoIds.add(videoId);
+                    reviewVideos.push(url);
+                    return true;
+                }
+                return false;
+            }
+
             // Detect page type
             const onProductPage = isProductPage();
             const onListingPage = isListingPage();
@@ -1747,704 +1778,638 @@ export default defineContentScript({
                     // ==========================================
                     // VIDEO EXTRACTION - Product & Reviews (INITIAL LOAD ONLY)
                     // ==========================================
-                    const seenAllVideoIds = new Set<string>();
+                    // 2. DOM Scraping for Product Images (Fallback/Verification)
+                    // Ensure what the user sees is also scraped, even if scripts fail
+                    if (onProductPage) {
+                        const domProdSelectors = [
+                            '#altImages li.item img',
+                            '#imageBlock .imageThumbnail img',
+                            '#altImages .a-unordered-list .a-list-item img',
+                            '#imageBlock .a-unordered-list li img',
+                            '.a-unordered-list.a-vertical li img', // Generic vertical list often used for galleries
+                            '#main-image-container img',
+                            '#landingImage',
+                            '.item.imageThumbnail img',
+                            'div#ivLargeImage img'
+                        ];
 
-                    function getVideoId(url: string): string {
-                        try {
-                            const parsed = new URL(url);
-                            return parsed.pathname;
-                        } catch {
-                            return url.split('?')[0];
-                        }
+                        document.querySelectorAll(domProdSelectors.join(', ')).forEach(el => {
+                            const img = el as HTMLImageElement;
+                            // Try src, data-src, or data-old-hires
+                            const src = img.src || img.getAttribute('data-src') || img.getAttribute('data-old-hires');
+                            if (src && isValidImage(src)) {
+                                // If it's a tiny thumbnail, try to find a hi-res replacement pattern or rely on toHighRes()
+                                // toHighRes already handles most patterns.
+                                // However, sometimes we need to be careful not to add junk.
+
+                                // Check for "sprite" or "transparent" is handled by isValidImage.
+                                addUniqueImage(src);
+                            }
+                        });
                     }
 
-                    function addProductVideo(url: string): boolean {
-                        if (!url || !url.startsWith('http')) return false;
-                        const videoId = getVideoId(url);
-                        if (!seenAllVideoIds.has(videoId)) {
-                            seenAllVideoIds.add(videoId);
-                            videos.push(url);
-                            return true;
-                        }
-                        return false;
-                    }
-
-                    function addReviewVideo(url: string): boolean {
-                        if (!url || !url.startsWith('http')) return false;
-                        const videoId = getVideoId(url);
-                        if (!seenAllVideoIds.has(videoId)) {
-                            seenAllVideoIds.add(videoId);
-                            reviewVideos.push(url);
-                            return true;
-                        }
-                        return false;
-                    }
-                // 2. DOM Scraping for Product Images (Fallback/Verification)
-                // Ensure what the user sees is also scraped, even if scripts fail
-                if (onProductPage) {
-                    const domProdSelectors = [
-                        '#altImages li.item img',
-                        '#imageBlock .imageThumbnail img',
-                        '#altImages .a-unordered-list .a-list-item img',
-                        '#imageBlock .a-unordered-list li img',
-                        '.a-unordered-list.a-vertical li img', // Generic vertical list often used for galleries
-                        '#main-image-container img',
-                        '#landingImage',
-                        '.item.imageThumbnail img',
-                        'div#ivLargeImage img'
+                    // 3. Extract from visible review tiles in DOM
+                    const reviewImageSelectors = [
+                        '[data-hook="review-image-tile"]',
+                        '.review-image-tile',
+                        '.review-image-thumbnail',
+                        '.cr-media-gallery .cr-lightbox-image-thumbnail',
+                        '#cm_cr-review_list img[data-src]',
+                        '.review-image-container img',
+                        '.cr-media-card-container img'
                     ];
 
-                    document.querySelectorAll(domProdSelectors.join(', ')).forEach(el => {
-                        const img = el as HTMLImageElement;
-                        // Try src, data-src, or data-old-hires
-                        const src = img.src || img.getAttribute('data-src') || img.getAttribute('data-old-hires');
-                        if (src && isValidImage(src)) {
-                            // If it's a tiny thumbnail, try to find a hi-res replacement pattern or rely on toHighRes()
-                            // toHighRes already handles most patterns.
-                            // However, sometimes we need to be careful not to add junk.
+                    document.querySelectorAll(reviewImageSelectors.join(', '))
+                        .forEach((el) => {
+                            const img = el.tagName === 'IMG' ? (el as HTMLImageElement) : el.querySelector('img');
+                            if (img) {
+                                const val = img.src || img.getAttribute('data-src') || '';
+                                if (val) addUniqueReviewImage(val, el.parentElement?.textContent || '');
+                            } else if (el.tagName === 'DIV' || el.tagName === 'A') {
+                                const style = window.getComputedStyle(el);
+                                const bg = style.backgroundImage;
+                                if (bg && bg.startsWith('url(')) {
+                                    const msg = bg.replace(/^url\(['"]?/, '').replace(/['"]?\)$/, '');
+                                    addUniqueReviewImage(msg);
+                                }
+                            }
+                        });
 
-                            // Check for "sprite" or "transparent" is handled by isValidImage.
-                            addUniqueImage(src);
-                        }
-                    });
-                }
-
-                // 3. Extract from visible review tiles in DOM
-                const reviewImageSelectors = [
-                    '[data-hook="review-image-tile"]',
-                    '.review-image-tile',
-                    '.review-image-thumbnail',
-                    '.cr-media-gallery .cr-lightbox-image-thumbnail',
-                    '#cm_cr-review_list img[data-src]',
-                    '.review-image-container img',
-                    '.cr-media-card-container img'
-                ];
-
-                document.querySelectorAll(reviewImageSelectors.join(', '))
-                    .forEach((el) => {
-                        const img = el.tagName === 'IMG' ? (el as HTMLImageElement) : el.querySelector('img');
-                        if (img) {
-                            const val = img.src || img.getAttribute('data-src') || '';
-                            if (val) addUniqueReviewImage(val, el.parentElement?.textContent || '');
-                        } else if (el.tagName === 'DIV' || el.tagName === 'A') {
-                            const style = window.getComputedStyle(el);
-                            const bg = style.backgroundImage;
-                            if (bg && bg.startsWith('url(')) {
-                                const msg = bg.replace(/^url\(['"]?/, '').replace(/['"]?\)$/, '');
-                                addUniqueReviewImage(msg);
+                    // 3. TERTIARY: Extract from review image lightbox/modal data
+                    // This captures images that might be shown in expanded/modal views
+                    const lightboxData = document.querySelector('[data-a-modal-state]');
+                    if (lightboxData) {
+                        const modalContent = lightboxData.getAttribute('data-a-modal-state') || '';
+                        if (modalContent.includes('review') || modalContent.includes('customer')) {
+                            const urls = modalContent.match(/https:\/\/[^"'\s,\]\[\}]+\.(jpg|jpeg|png|webp)[^"'\s,\]\[\}]*/gi);
+                            if (urls) {
+                                urls.forEach(url => {
+                                    url = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
+                                    addUniqueReviewImage(url);
+                                });
                             }
                         }
-                    });
+                    }
 
-                // 3. TERTIARY: Extract from review image lightbox/modal data
-                // This captures images that might be shown in expanded/modal views
-                const lightboxData = document.querySelector('[data-a-modal-state]');
-                if (lightboxData) {
-                    const modalContent = lightboxData.getAttribute('data-a-modal-state') || '';
-                    if (modalContent.includes('review') || modalContent.includes('customer')) {
-                        const urls = modalContent.match(/https:\/\/[^"'\s,\]\[\}]+\.(jpg|jpeg|png|webp)[^"'\s,\]\[\}]*/gi);
-                        if (urls) {
-                            urls.forEach(url => {
-                                url = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                addUniqueReviewImage(url);
-                            });
+                    console.log(`AMZImage: Found ${reviewImages.length} review images`);
+
+                    // ==========================================
+                    // VIDEO EXTRACTION - Product & Reviews
+                    // ==========================================
+
+                    // Helper to determine if a video is a customer review video based on context
+                    // COMPREHENSIVE: Capture ALL customer review videos reliably
+                    // Helper to determine if a video is a customer review video based on context
+                    // COMPREHENSIVE: Capture ALL customer review videos reliably
+                    function isReviewVideoContext(content: string, url: string): boolean {
+                        const lowerContent = content.toLowerCase();
+                        const lowerUrl = url.toLowerCase();
+
+                        // First, exclude if it's promotional/competitor content
+                        if (isPromotionalContent(content, url)) {
+                            return false;
                         }
-                    }
-                }
 
-                console.log(`AMZImage: Found ${reviewImages.length} review images`);
+                        // COMPREHENSIVE URL patterns that indicate customer review videos
+                        const reviewUrlPatterns = [
+                            'customer-review',
+                            'customerreview',
+                            'customer_review',
+                            'review-video',
+                            'reviewvideo',
+                            'review_video',
+                            'ugc-video',
+                            'ugcvideo',
+                            'ugc_video',
+                            'ugc',
+                            'user-review',
+                            'userreview',
+                            'user_review',
+                            'user-video',
+                            'uservideo',
+                            'user_video',
+                            'cm_cr',
+                            'crwidget',
+                            'cr-media',
+                            'crmedia',
+                            'cr_media',
+                            'customer-media',
+                            'customermedia'
+                        ];
 
-                // ==========================================
-                // VIDEO EXTRACTION - Product & Reviews
-                // ==========================================
-                const seenAllVideoIds = new Set<string>();
+                        if (reviewUrlPatterns.some(pattern => lowerUrl.includes(pattern))) {
+                            return true;
+                        }
 
-                function getVideoId(url: string): string {
-                    try {
-                        const parsed = new URL(url);
-                        // Use path and filename but ignore query params for uniqueness
-                        return parsed.pathname;
-                    } catch (e) {
-                        return url.split('?')[0];
-                    }
-                }
+                        // REMOVED: Text-based context scanning (searching for 'review' keywords near the URL).
+                        // This was too aggressive and caused false positives (e.g. picking up related videos).
+                        // We now rely on:
+                        // 1. Explicit Review Data Blocks (customerVideos, reviewImages, etc.)
+                        // 2. Strict DOM Scoping (videos inside #customer-reviews)
+                        // 3. URLs that explicitly say "customer-review"
 
-                function addProductVideo(url: string): boolean {
-                    if (!url || !url.startsWith('http')) return false;
-                    const videoId = getVideoId(url);
-                    // Prevent duplicate and overlap with review videos
-                    if (!seenAllVideoIds.has(videoId)) {
-                        seenAllVideoIds.add(videoId);
-                        videos.push(url);
-                        return true;
-                    }
-                    return false;
-                }
-
-                function addReviewVideo(url: string): boolean {
-                    if (!url || !url.startsWith('http')) return false;
-                    const videoId = getVideoId(url);
-                    // Prevent duplicate and overlap with official videos
-                    if (!seenAllVideoIds.has(videoId)) {
-                        seenAllVideoIds.add(videoId);
-                        reviewVideos.push(url);
-                        return true;
-                    }
-                    return false;
-                }
-
-                // Helper to determine if a video is a customer review video based on context
-                // COMPREHENSIVE: Capture ALL customer review videos reliably
-                // Helper to determine if a video is a customer review video based on context
-                // COMPREHENSIVE: Capture ALL customer review videos reliably
-                function isReviewVideoContext(content: string, url: string): boolean {
-                    const lowerContent = content.toLowerCase();
-                    const lowerUrl = url.toLowerCase();
-
-                    // First, exclude if it's promotional/competitor content
-                    if (isPromotionalContent(content, url)) {
                         return false;
                     }
 
-                    // COMPREHENSIVE URL patterns that indicate customer review videos
-                    const reviewUrlPatterns = [
-                        'customer-review',
-                        'customerreview',
-                        'customer_review',
-                        'review-video',
-                        'reviewvideo',
-                        'review_video',
-                        'ugc-video',
-                        'ugcvideo',
-                        'ugc_video',
-                        'ugc',
-                        'user-review',
-                        'userreview',
-                        'user_review',
-                        'user-video',
-                        'uservideo',
-                        'user_video',
-                        'cm_cr',
-                        'crwidget',
-                        'cr-media',
-                        'crmedia',
-                        'cr_media',
-                        'customer-media',
-                        'customermedia'
-                    ];
+                    // 1. Broad-Spectrum Scanner: SCAN ALL SCRIPTS ONCE FOR MEDIA (Aggressive Discovery)
+                    imageScripts.forEach(script => {
+                        const scriptContent = script.textContent || '';
+                        if (scriptContent.length < 50) return;
 
-                    if (reviewUrlPatterns.some(pattern => lowerUrl.includes(pattern))) {
-                        return true;
-                    }
+                        const lowerScript = scriptContent.toLowerCase();
+                        if (lowerScript.includes('video') || lowerScript.includes('image') ||
+                            lowerScript.includes('media') || lowerScript.includes('gallery')) {
 
-                    // REMOVED: Text-based context scanning (searching for 'review' keywords near the URL).
-                    // This was too aggressive and caused false positives (e.g. picking up related videos).
-                    // We now rely on:
-                    // 1. Explicit Review Data Blocks (customerVideos, reviewImages, etc.)
-                    // 2. Strict DOM Scoping (videos inside #customer-reviews)
-                    // 3. URLs that explicitly say "customer-review"
-
-                    return false;
-                }
-
-                // 1. Broad-Spectrum Scanner: SCAN ALL SCRIPTS ONCE FOR MEDIA (Aggressive Discovery)
-                imageScripts.forEach(script => {
-                    const scriptContent = script.textContent || '';
-                    if (scriptContent.length < 50) return;
-
-                    const lowerScript = scriptContent.toLowerCase();
-                    if (lowerScript.includes('video') || lowerScript.includes('image') ||
-                        lowerScript.includes('media') || lowerScript.includes('gallery')) {
-
-                        // Look for any MP4, m3u8, mpd, or webm URLs
-                        const vMatch = scriptContent.match(/https?:\/\/[^"'\s,\]\[\}]+\.(mp4|m3u8|mpd|webm)[^"'\s,\]\[\}]*/gi);
-                        if (vMatch) {
-                            vMatch.forEach(vUrl => {
-                                const cleanUrl = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                if (!isPromotionalContent(scriptContent, cleanUrl)) {
-                                    // PRIORITY FIX: Check Official Context FIRST
-                                    if (isOfficialProductVideo(scriptContent, cleanUrl)) addProductVideo(cleanUrl);
-                                    else if (isReviewVideoContext(scriptContent, cleanUrl)) addReviewVideo(cleanUrl);
-                                }
-                            });
-                        }
-
-                        // Look for high-res images in JSON arrays
-                        const iMatch = scriptContent.match(/https?:\/\/[^"'\s,\]\[\}]+\.(jpg|jpeg|png|webp)[^"'\s,\]\[\}]*/gi);
-                        if (iMatch) {
-                            iMatch.forEach(iUrl => {
-                                if (iUrl.includes('/images/I/') && !iUrl.includes('avatar') && !iUrl.includes('sprite')) {
-                                    const hi = toHighRes(iUrl.replace(/\\u002F/g, '/').replace(/\\/g, ''));
-                                    if (isValidImage(hi)) {
-                                        if (isCustomerReviewImage(hi, script)) addUniqueReviewImage(hi, scriptContent);
-                                        else addUniqueImage(hi);
+                            // Look for any MP4, m3u8, mpd, or webm URLs
+                            const vMatch = scriptContent.match(/https?:\/\/[^"'\s,\]\[\}]+\.(mp4|m3u8|mpd|webm)[^"'\s,\]\[\}]*/gi);
+                            if (vMatch) {
+                                vMatch.forEach(vUrl => {
+                                    const cleanUrl = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '');
+                                    if (!isPromotionalContent(scriptContent, cleanUrl)) {
+                                        // PRIORITY FIX: Check Official Context FIRST
+                                        if (isOfficialProductVideo(scriptContent, cleanUrl)) addProductVideo(cleanUrl);
+                                        else if (isReviewVideoContext(scriptContent, cleanUrl)) addReviewVideo(cleanUrl);
                                     }
-                                }
-                            });
-                        }
-                    }
-                });
+                                });
+                            }
 
-                // 2. Specific Pattern Extraction
-                imageScripts.forEach(script => {
-                    const content = script.textContent || '';
-                    if (!content || content.length < 100) return;
-
-                    const lowerContent = content.toLowerCase();
-                    if (lowerContent.includes('similar brands on amazon') ||
-                        lowerContent.includes('similarbrand') ||
-                        lowerContent.includes('sponsored-brand')) {
-                        // Still check for review videos in these blocks, but skip product videos
-                        const reviewOnlyPatterns = /"(?:customerReview|reviewVideo|ugcVideo|reviewVideoUrl)[^"]*"\s*:\s*"(https:\/\/[^"]+\.mp4[^"]*)"/gi;
-                        let reviewMatch;
-                        while ((reviewMatch = reviewOnlyPatterns.exec(content)) !== null) {
-                            addReviewVideo(reviewMatch[1].replace(/\\u002F/g, '/').replace(/\\/g, ''));
-                        }
-                        return;
-                    }
-
-                    // Pattern 1: Direct MP4 URLs in various formats
-                    const mp4Patterns = [
-                        /"url"\s*:\s*"(https:\/\/[^"]+\.mp4[^"]*)"/g,
-                        /"videoUrl"\s*:\s*"(https:\/\/[^"]+)"/g,
-                        /"progressiveUrl"\s*:\s*"(https:\/\/[^"]+)"/g,
-                        /"hlsUrl"\s*:\s*"(https:\/\/[^"]+\.m3u8[^"]*)"/g,
-                        /"dashUrl"\s*:\s*"(https:\/\/[^"]+\.mpd[^"]*)"/g,
-                    ];
-
-                    mp4Patterns.forEach(pattern => {
-                        let match;
-                        while ((match = pattern.exec(content)) !== null) {
-                            let url = match[1];
-                            // Clean escaped characters
-                            url = url.replace(/\\u002F/g, '/').replace(/\\\\/g, '/').replace(/\\/g, '');
-                            if (url.includes('.mp4') || url.includes('.m3u8') || url.includes('.mpd')) {
-                                // Categorize as review or product video
-                                if (isReviewVideoContext(content, url)) {
-                                    addReviewVideo(url);
-                                } else if (isOfficialProductVideo(content, url)) {
-                                    // Only add if it's an official product video (not promotional)
-                                    addProductVideo(url);
-                                }
+                            // Look for high-res images in JSON arrays
+                            const iMatch = scriptContent.match(/https?:\/\/[^"'\s,\]\[\}]+\.(jpg|jpeg|png|webp)[^"'\s,\]\[\}]*/gi);
+                            if (iMatch) {
+                                iMatch.forEach(iUrl => {
+                                    if (iUrl.includes('/images/I/') && !iUrl.includes('avatar') && !iUrl.includes('sprite')) {
+                                        const hi = toHighRes(iUrl.replace(/\\u002F/g, '/').replace(/\\/g, ''));
+                                        if (isValidImage(hi)) {
+                                            if (isCustomerReviewImage(hi, script)) addUniqueReviewImage(hi, scriptContent);
+                                            else addUniqueImage(hi);
+                                        }
+                                    }
+                                });
                             }
                         }
                     });
 
-                    // Pattern 2: Video manifest/config objects
-                    const manifestMatch = content.match(/"videos"\s*:\s*\[([\s\S]*?)\]/);
-                    if (manifestMatch) {
-                        const block = manifestMatch[0];
-                        const lowerBlock = block.toLowerCase();
+                    // 2. Specific Pattern Extraction
+                    imageScripts.forEach(script => {
+                        const content = script.textContent || '';
+                        if (!content || content.length < 100) return;
 
-                        // Skip if this is a promotional/similar brands video block
-                        if (isPromotionalContent(block, '')) {
+                        const lowerContent = content.toLowerCase();
+                        if (lowerContent.includes('similar brands on amazon') ||
+                            lowerContent.includes('similarbrand') ||
+                            lowerContent.includes('sponsored-brand')) {
+                            // Still check for review videos in these blocks, but skip product videos
+                            const reviewOnlyPatterns = /"(?:customerReview|reviewVideo|ugcVideo|reviewVideoUrl)[^"]*"\s*:\s*"(https:\/\/[^"]+\.mp4[^"]*)"/gi;
+                            let reviewMatch;
+                            while ((reviewMatch = reviewOnlyPatterns.exec(content)) !== null) {
+                                addReviewVideo(reviewMatch[1].replace(/\\u002F/g, '/').replace(/\\/g, ''));
+                            }
                             return;
                         }
 
-                        const isReviewBlock = lowerBlock.includes('customerreview') ||
-                            lowerBlock.includes('customer-review') ||
-                            lowerBlock.includes('reviewvideo');
-                        const videoUrls = manifestMatch[1].match(/https:\/\/[^"'\s,\]]+\.(mp4|m3u8|mpd)[^"'\s,\]]*/g);
-                        if (videoUrls) {
-                            videoUrls.forEach(url => {
-                                url = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                if (isReviewBlock || isReviewVideoContext(content, url)) {
-                                    addReviewVideo(url);
-                                } else if (isOfficialProductVideo(block, url)) {
-                                    addProductVideo(url);
-                                }
-                            });
-                        }
-                    }
+                        // Pattern 1: Direct MP4 URLs in various formats
+                        const mp4Patterns = [
+                            /"url"\s*:\s*"(https:\/\/[^"]+\.mp4[^"]*)"/g,
+                            /"videoUrl"\s*:\s*"(https:\/\/[^"]+)"/g,
+                            /"progressiveUrl"\s*:\s*"(https:\/\/[^"]+)"/g,
+                            /"hlsUrl"\s*:\s*"(https:\/\/[^"]+\.m3u8[^"]*)"/g,
+                            /"dashUrl"\s*:\s*"(https:\/\/[^"]+\.mpd[^"]*)"/g,
+                        ];
 
-                    // Pattern 3: Video data blocks
-                    const videoDataMatch = content.match(/"videoData"\s*:\s*{([^}]+)}/g);
-                    if (videoDataMatch) {
-                        videoDataMatch.forEach(block => {
-                            // Skip promotional video blocks
+                        mp4Patterns.forEach(pattern => {
+                            let match;
+                            while ((match = pattern.exec(content)) !== null) {
+                                let url = match[1];
+                                // Clean escaped characters
+                                url = url.replace(/\\u002F/g, '/').replace(/\\\\/g, '/').replace(/\\/g, '');
+                                if (url.includes('.mp4') || url.includes('.m3u8') || url.includes('.mpd')) {
+                                    // Categorize as review or product video
+                                    if (isReviewVideoContext(content, url)) {
+                                        addReviewVideo(url);
+                                    } else if (isOfficialProductVideo(content, url)) {
+                                        // Only add if it's an official product video (not promotional)
+                                        addProductVideo(url);
+                                    }
+                                }
+                            }
+                        });
+
+                        // Pattern 2: Video manifest/config objects
+                        const manifestMatch = content.match(/"videos"\s*:\s*\[([\s\S]*?)\]/);
+                        if (manifestMatch) {
+                            const block = manifestMatch[0];
+                            const lowerBlock = block.toLowerCase();
+
+                            // Skip if this is a promotional/similar brands video block
                             if (isPromotionalContent(block, '')) {
                                 return;
                             }
 
-                            const urlMatch = block.match(/"url"\s*:\s*"([^"]+)"/);
-                            if (urlMatch) {
-                                let url = urlMatch[1].replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                if (isReviewVideoContext(block, url)) {
-                                    addReviewVideo(url);
-                                } else if (isOfficialProductVideo(block, url)) {
-                                    addProductVideo(url);
-                                }
-                            }
-                        });
-                    }
-
-                    // Pattern 3b: Amazon VSE Video Data - Enhanced multi-video support
-                    const vsePatterns = [
-                        /"vseVideoData"\s*:\s*(\[[\s\S]*?\])(?:\s*,|\s*\})/,
-                        /"vseVideoList"\s*:\s*(\[[\s\S]*?\])(?:\s*,|\s*\})/,
-                        /"vseVideoItems"\s*:\s*(\[[\s\S]*?\])(?:\s*,|\s*\})/,
-                        /"videoList"\s*:\s*(\[[\s\S]*?\])(?:\s*,|\s*\})/
-                    ];
-
-                    vsePatterns.forEach(regex => {
-                        const vMatch = content.match(regex);
-                        if (vMatch) {
-                            try {
-                                const videoBlock = vMatch[1];
-                                // Improved regex to handle escaped slashes and more formats
-                                const videoUrls = videoBlock.match(/https?:\/\/[^"'\s,\]]+\.(mp4|m3u8|mpd|webm)[^"'\s,\]]*/gi);
-                                if (videoUrls) {
-                                    videoUrls.forEach(vUrl => {
-                                        const cleanUrl = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                        const urlIndex = videoBlock.indexOf(vUrl);
-                                        const vContext = videoBlock.substring(Math.max(0, urlIndex - 400), Math.min(videoBlock.length, urlIndex + 400)).toLowerCase();
-
-                                        if (!isPromotionalContent(vContext, cleanUrl)) {
-                                            // Categorize accurately
-                                            if (isReviewVideoContext(vContext, cleanUrl)) {
-                                                addReviewVideo(cleanUrl);
-                                            } else {
-                                                addProductVideo(cleanUrl);
-                                            }
-                                        }
-                                    });
-                                }
-                            } catch (e) { }
-                        }
-                    });
-
-                    // Pattern 4: Unified global video scanner - captures and categorizes every video match
-                    const globalVideoMatches = content.match(/https?:\/\/[^"'\s]*?(?:amazon|ssl|media-amazon)[^"'\s]*?\.(mp4|m3u8|mpd|webm)[^"'\s]*/gi);
-                    if (globalVideoMatches) {
-                        globalVideoMatches.forEach(vUrl => {
-                            const cleanUrl = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                            const urlIndex = content.indexOf(vUrl);
-                            const vContext = content.substring(Math.max(0, urlIndex - 400), Math.min(content.length, urlIndex + 400)).toLowerCase();
-
-                            if (!isPromotionalContent(vContext, cleanUrl)) {
-                                if (isReviewVideoContext(vContext, cleanUrl)) {
-                                    addReviewVideo(cleanUrl);
-                                } else if (isOfficialProductVideo(content, cleanUrl)) {
-                                    addProductVideo(cleanUrl);
-                                }
-                            }
-                        });
-                    }
-
-                    // Pattern 5: Review-specific video data
-                    const reviewVideoMatches = content.match(/"reviewVideo[^"]*"\s*:\s*"(https:\/\/[^"]+)"/gi);
-                    if (reviewVideoMatches) {
-                        reviewVideoMatches.forEach(match => {
-                            const urlMatch = match.match(/"(https:\/\/[^"]+)"/);
-                            if (urlMatch) {
-                                addReviewVideo(urlMatch[1].replace(/\\u002F/g, '/').replace(/\\/g, ''));
-                            }
-                        });
-                    }
-
-                    // Pattern 5b: Additional customer video manifest patterns
-                    const customerVideoMatch = content.match(/"customerVideoManifest"\s*:\s*\{([\s\S]*?)\}/g);
-                    if (customerVideoMatch) {
-                        customerVideoMatch.forEach(match => {
-                            const urls = match.match(/https:\/\/[^"'\s,\]\[\}]+\.(mp4|m3u8|mpd)[^"'\s,\]\[\}]*/gi);
-                            if (urls) {
-                                urls.forEach(url => {
+                            const isReviewBlock = lowerBlock.includes('customerreview') ||
+                                lowerBlock.includes('customer-review') ||
+                                lowerBlock.includes('reviewvideo');
+                            const videoUrls = manifestMatch[1].match(/https:\/\/[^"'\s,\]]+\.(mp4|m3u8|mpd)[^"'\s,\]]*/g);
+                            if (videoUrls) {
+                                videoUrls.forEach(url => {
                                     url = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                    addReviewVideo(url);
+                                    if (isReviewBlock || isReviewVideoContext(content, url)) {
+                                        addReviewVideo(url);
+                                    } else if (isOfficialProductVideo(block, url)) {
+                                        addProductVideo(url);
+                                    }
                                 });
                             }
-                        });
-                    }
-
-                    // Pattern 5c: Modern Review Video Data
-                    const reviewVideoDataMatch = content.match(/ReviewVideoGalleryData\s*:\s*(\[[\s\S]*?\])/i);
-                    if (reviewVideoDataMatch) {
-                        try {
-                            const galleryData = JSON.parse(reviewVideoDataMatch[1].replace(/'/g, '"'));
-                            galleryData.forEach((item: any) => {
-                                const url = item.videoUrl || item.url || '';
-                                if (url) addReviewVideo(url);
-                            });
-                        } catch (e) { }
-                    }
-
-                    // Pattern 6: Amazon's videoBlockData - main source for product videos in gallery
-                    // Relaxed keywords to ensure we don't miss isolated video blocks
-                    if (lowerContent.includes('video') || lowerContent.includes('media') || lowerContent.includes('vse')) {
-
-                        const videoBlockMatch = content.match(/(?:'videos'|"videos")\s*:\s*(\[[\s\S]*?\])(?:\s*,|\s*\})/);
-                        if (videoBlockMatch) {
-                            try {
-                                const videoArrayStr = videoBlockMatch[1].replace(/'/g, '"');
-                                const videoArray = JSON.parse(videoArrayStr);
-                                if (Array.isArray(videoArray)) {
-                                    videoArray.forEach((videoItem: any) => {
-                                        // Extract all video URL formats
-                                        const url = videoItem.url || videoItem.videoUrl ||
-                                            videoItem.progressiveUrl || videoItem.hlsUrl || '';
-                                        if (url) {
-                                            const cleanUrl = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                                            // Double-check it's not promotional
-                                            if (!isPromotionalContent(JSON.stringify(videoItem), cleanUrl)) {
-                                                // Also look into variants array for higher-res or alternative formats
-                                                if (videoItem.variants && Array.isArray(videoItem.variants)) {
-                                                    videoItem.variants.forEach((variant: any) => {
-                                                        const vUrl = variant.url || variant.videoUrl || '';
-                                                        if (vUrl) addProductVideo(vUrl.replace(/\\u002F/g, '/').replace(/\\/g, ''));
-                                                    });
-                                                }
-                                                addProductVideo(cleanUrl);
-                                            }
-                                        }
-                                    });
-                                }
-                            } catch (e) { }
                         }
 
-                        // Pattern 7: SlateManifest contains video playback data
-                        const slateMatch = content.match(/"slateUrl"\s*:\s*"(https:\/\/[^"]+)"/g);
-                        if (slateMatch) {
-                            slateMatch.forEach(match => {
+                        // Pattern 3: Video data blocks
+                        const videoDataMatch = content.match(/"videoData"\s*:\s*{([^}]+)}/g);
+                        if (videoDataMatch) {
+                            videoDataMatch.forEach(block => {
+                                // Skip promotional video blocks
+                                if (isPromotionalContent(block, '')) {
+                                    return;
+                                }
+
+                                const urlMatch = block.match(/"url"\s*:\s*"([^"]+)"/);
+                                if (urlMatch) {
+                                    let url = urlMatch[1].replace(/\\u002F/g, '/').replace(/\\/g, '');
+                                    if (isReviewVideoContext(block, url)) {
+                                        addReviewVideo(url);
+                                    } else if (isOfficialProductVideo(block, url)) {
+                                        addProductVideo(url);
+                                    }
+                                }
+                            });
+                        }
+
+                        // Pattern 3b: Amazon VSE Video Data - Enhanced multi-video support
+                        const vsePatterns = [
+                            /"vseVideoData"\s*:\s*(\[[\s\S]*?\])(?:\s*,|\s*\})/,
+                            /"vseVideoList"\s*:\s*(\[[\s\S]*?\])(?:\s*,|\s*\})/,
+                            /"vseVideoItems"\s*:\s*(\[[\s\S]*?\])(?:\s*,|\s*\})/,
+                            /"videoList"\s*:\s*(\[[\s\S]*?\])(?:\s*,|\s*\})/
+                        ];
+
+                        vsePatterns.forEach(regex => {
+                            const vMatch = content.match(regex);
+                            if (vMatch) {
+                                try {
+                                    const videoBlock = vMatch[1];
+                                    // Improved regex to handle escaped slashes and more formats
+                                    const videoUrls = videoBlock.match(/https?:\/\/[^"'\s,\]]+\.(mp4|m3u8|mpd|webm)[^"'\s,\]]*/gi);
+                                    if (videoUrls) {
+                                        videoUrls.forEach(vUrl => {
+                                            const cleanUrl = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '');
+                                            const urlIndex = videoBlock.indexOf(vUrl);
+                                            const vContext = videoBlock.substring(Math.max(0, urlIndex - 400), Math.min(videoBlock.length, urlIndex + 400)).toLowerCase();
+
+                                            if (!isPromotionalContent(vContext, cleanUrl)) {
+                                                // Categorize accurately
+                                                if (isReviewVideoContext(vContext, cleanUrl)) {
+                                                    addReviewVideo(cleanUrl);
+                                                } else {
+                                                    addProductVideo(cleanUrl);
+                                                }
+                                            }
+                                        });
+                                    }
+                                } catch (e) { }
+                            }
+                        });
+
+                        // Pattern 4: Unified global video scanner - captures and categorizes every video match
+                        const globalVideoMatches = content.match(/https?:\/\/[^"'\s]*?(?:amazon|ssl|media-amazon)[^"'\s]*?\.(mp4|m3u8|mpd|webm)[^"'\s]*/gi);
+                        if (globalVideoMatches) {
+                            globalVideoMatches.forEach(vUrl => {
+                                const cleanUrl = vUrl.replace(/\\u002F/g, '/').replace(/\\/g, '');
+                                const urlIndex = content.indexOf(vUrl);
+                                const vContext = content.substring(Math.max(0, urlIndex - 400), Math.min(content.length, urlIndex + 400)).toLowerCase();
+
+                                if (!isPromotionalContent(vContext, cleanUrl)) {
+                                    if (isReviewVideoContext(vContext, cleanUrl)) {
+                                        addReviewVideo(cleanUrl);
+                                    } else if (isOfficialProductVideo(content, cleanUrl)) {
+                                        addProductVideo(cleanUrl);
+                                    }
+                                }
+                            });
+                        }
+
+                        // Pattern 5: Review-specific video data
+                        const reviewVideoMatches = content.match(/"reviewVideo[^"]*"\s*:\s*"(https:\/\/[^"]+)"/gi);
+                        if (reviewVideoMatches) {
+                            reviewVideoMatches.forEach(match => {
                                 const urlMatch = match.match(/"(https:\/\/[^"]+)"/);
                                 if (urlMatch) {
-                                    // Slate URLs are video thumbnails, find corresponding video
-                                    const slateUrl = urlMatch[1];
-                                    // Look for video URL near the slate URL
-                                    const nearbyContent = content.substring(
-                                        Math.max(0, content.indexOf(slateUrl) - 500),
-                                        content.indexOf(slateUrl) + 500
-                                    );
-
-                                    // Only extract if not in promotional context
-                                    if (!isPromotionalContent(nearbyContent, slateUrl)) {
-                                        const videoMatch = nearbyContent.match(/"(?:url|videoUrl|progressiveUrl)"\s*:\s*"(https:\/\/[^"]+\.mp4[^"]*)"/);
-                                        if (videoMatch) {
-                                            addProductVideo(videoMatch[1].replace(/\\u002F/g, '/').replace(/\\/g, ''));
-                                        }
-                                    }
+                                    addReviewVideo(urlMatch[1].replace(/\\u002F/g, '/').replace(/\\/g, ''));
                                 }
                             });
                         }
-                    }
-                });
 
-                // 2. DOM fallback for product videos (video thumbnails in product gallery)
-                // STRICT: Only from main product image gallery, exclude promotional sections
-                document.querySelectorAll<HTMLElement>('#imageBlock .videoThumbnail, #altImages .videoThumbnail, #main-image-container [data-video-url], .vse-video-item')
-                    .forEach((el) => {
-                        // Skip if in a promotional or "similar brands" section
-                        if (el.closest('[data-component-type*="brand"]') ||
-                            el.closest('[class*="similar-brand"]') ||
-                            el.closest('[class*="sponsored"]') ||
-                            el.closest('#similarities_feature_div') ||
-                            el.closest('#sp_detail') ||
-                            el.closest('.aplus-module')) {
-                            return;
-                        }
-
-                        const videoUrl = el.getAttribute('data-video-url') ||
-                            el.querySelector('[data-video-url]')?.getAttribute('data-video-url') ||
-                            el.getAttribute('data-vse-video-url') ||
-                            el.getAttribute('data-vse-video-progressive-url') ||
-                            el.closest('.vse-video-item')?.getAttribute('data-video-url');
-
-                        if (videoUrl && videoUrl.startsWith('http')) {
-                            addProductVideo(videoUrl);
-                        } else {
-                            // Support for encoded video JSON in thumbnails
-                            const videoData = el.getAttribute('data-a-video-data') ||
-                                el.querySelector('[data-a-video-data]')?.getAttribute('data-a-video-data');
-                            if (videoData) {
-                                try {
-                                    const parsed = JSON.parse(videoData);
-                                    const url = parsed.url || parsed.videoUrl || (parsed.sources && parsed.sources[0]?.url);
-                                    if (url && url.startsWith('http')) addProductVideo(url);
-                                } catch (e) { }
-                            }
-                        }
-                    });
-
-                // 3. DOM fallback for review videos - STRICT: Only from customer reviews section
-                const reviewVideoSelectors = [
-                    '#customer-reviews video',
-                    '#cm_cr-review_list video',
-                    '.cr-widget-FocalReviews video',
-                    '[data-hook="review-video"]',
-                    '[data-hook="review-body"] video',
-                    '.review-video-container video',
-                    '#customer-reviews [data-video-url]',
-                    '#cm_cr-review_list [data-video-url]',
-                    '.cr-media-gallery [data-video-url]',
-                    '.cr-media-gallery [data-a-video-data]',
-                    '.review-image-tile[data-video-url]'
-                ];
-
-                document.querySelectorAll<HTMLElement>(reviewVideoSelectors.join(', '))
-                    .forEach((el) => {
-                        let videoUrl = '';
-                        if (el.tagName.toLowerCase() === 'video') {
-                            videoUrl = (el as HTMLVideoElement).src;
-                            if (!videoUrl) {
-                                const source = el.querySelector('source');
-                                if (source) videoUrl = source.src;
-                            }
-                        } else {
-                            // Check for various data attributes
-                            videoUrl = el.getAttribute('data-video-url') ||
-                                el.getAttribute('data-reorder-video-url') ||
-                                el.getAttribute('data-video-source') || '';
-
-                            // If it's a JSON block (common in review gallery)
-                            const videoData = el.getAttribute('data-a-video-data') || el.getAttribute('data-a-player-preload');
-                            if (videoData) {
-                                try {
-                                    const parsed = JSON.parse(videoData);
-                                    const url = parsed.url || parsed.videoUrl || (parsed.sources && parsed.sources[0]?.url) || parsed.progressiveUrl;
-                                    if (url) videoUrl = url;
-                                } catch (e) { }
-                            }
-                        }
-                        if (videoUrl && videoUrl.startsWith('http')) {
-                            addReviewVideo(videoUrl);
-                        }
-                    });
-
-                // 5. FORCE SCAN: Deep scan of customer review section for ANY video data attributes
-                // This catches custom player implementations where the data might be on a container div/span
-                const reviewContainers = document.querySelectorAll('#customer-reviews, #cm_cr-review_list, .cr-widget-FocalReviews');
-                reviewContainers.forEach(container => {
-                    const videoDataElements = container.querySelectorAll('[data-a-player-preload], [data-a-video-data], [data-video-url]');
-                    videoDataElements.forEach(el => {
-                        try {
-                            // Direct URL
-                            const directUrl = el.getAttribute('data-video-url');
-                            if (directUrl && directUrl.startsWith('http')) {
-                                addReviewVideo(directUrl);
-                            }
-
-                            // JSON Data
-                            const jsonStr = el.getAttribute('data-a-player-preload') || el.getAttribute('data-a-video-data');
-                            if (jsonStr) {
-                                const parsed = JSON.parse(jsonStr);
-                                // Try common Amazon video JSON structures
-                                const foundUrl = parsed.url ||
-                                    parsed.videoUrl ||
-                                    parsed.progressiveUrl ||
-                                    (parsed.sources && parsed.sources[0]?.url);
-
-                                if (foundUrl && typeof foundUrl === 'string' && foundUrl.startsWith('http')) {
-                                    addReviewVideo(foundUrl);
+                        // Pattern 5b: Additional customer video manifest patterns
+                        const customerVideoMatch = content.match(/"customerVideoManifest"\s*:\s*\{([\s\S]*?)\}/g);
+                        if (customerVideoMatch) {
+                            customerVideoMatch.forEach(match => {
+                                const urls = match.match(/https:\/\/[^"'\s,\]\[\}]+\.(mp4|m3u8|mpd)[^"'\s,\]\[\}]*/gi);
+                                if (urls) {
+                                    urls.forEach(url => {
+                                        url = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
+                                        addReviewVideo(url);
+                                    });
                                 }
+                            });
+                        }
+
+                        // Pattern 5c: Modern Review Video Data
+                        const reviewVideoDataMatch = content.match(/ReviewVideoGalleryData\s*:\s*(\[[\s\S]*?\])/i);
+                        if (reviewVideoDataMatch) {
+                            try {
+                                const galleryData = JSON.parse(reviewVideoDataMatch[1].replace(/'/g, '"'));
+                                galleryData.forEach((item: any) => {
+                                    const url = item.videoUrl || item.url || '';
+                                    if (url) addReviewVideo(url);
+                                });
+                            } catch (e) { }
+                        }
+
+                        // Pattern 6: Amazon's videoBlockData - main source for product videos in gallery
+                        // Relaxed keywords to ensure we don't miss isolated video blocks
+                        if (lowerContent.includes('video') || lowerContent.includes('media') || lowerContent.includes('vse')) {
+
+                            const videoBlockMatch = content.match(/(?:'videos'|"videos")\s*:\s*(\[[\s\S]*?\])(?:\s*,|\s*\})/);
+                            if (videoBlockMatch) {
+                                try {
+                                    const videoArrayStr = videoBlockMatch[1].replace(/'/g, '"');
+                                    const videoArray = JSON.parse(videoArrayStr);
+                                    if (Array.isArray(videoArray)) {
+                                        videoArray.forEach((videoItem: any) => {
+                                            // Extract all video URL formats
+                                            const url = videoItem.url || videoItem.videoUrl ||
+                                                videoItem.progressiveUrl || videoItem.hlsUrl || '';
+                                            if (url) {
+                                                const cleanUrl = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
+                                                // Double-check it's not promotional
+                                                if (!isPromotionalContent(JSON.stringify(videoItem), cleanUrl)) {
+                                                    // Also look into variants array for higher-res or alternative formats
+                                                    if (videoItem.variants && Array.isArray(videoItem.variants)) {
+                                                        videoItem.variants.forEach((variant: any) => {
+                                                            const vUrl = variant.url || variant.videoUrl || '';
+                                                            if (vUrl) addProductVideo(vUrl.replace(/\\u002F/g, '/').replace(/\\/g, ''));
+                                                        });
+                                                    }
+                                                    addProductVideo(cleanUrl);
+                                                }
+                                            }
+                                        });
+                                    }
+                                } catch (e) { }
                             }
-                        } catch (e) { }
-                    });
-                });
 
-                // 4. Generic video fallback - STRICT categorization based on DOM location
-                document.querySelectorAll<HTMLVideoElement>('video')
-                    .forEach((video) => {
-                        const videoUrl = video.src || video.querySelector('source')?.src;
-                        if (!videoUrl || !videoUrl.startsWith('http')) return;
+                            // Pattern 7: SlateManifest contains video playback data
+                            const slateMatch = content.match(/"slateUrl"\s*:\s*"(https:\/\/[^"]+)"/g);
+                            if (slateMatch) {
+                                slateMatch.forEach(match => {
+                                    const urlMatch = match.match(/"(https:\/\/[^"]+)"/);
+                                    if (urlMatch) {
+                                        // Slate URLs are video thumbnails, find corresponding video
+                                        const slateUrl = urlMatch[1];
+                                        // Look for video URL near the slate URL
+                                        const nearbyContent = content.substring(
+                                            Math.max(0, content.indexOf(slateUrl) - 500),
+                                            content.indexOf(slateUrl) + 500
+                                        );
 
-                        // Skip videos in promotional/similar brands sections
-                        if (video.closest('[data-component-type*="brand"]') ||
-                            video.closest('[class*="similar-brand"]') ||
-                            video.closest('[class*="sponsored"]') ||
-                            video.closest('#similarities_feature_div') ||
-                            video.closest('#sp_detail') ||
-                            video.closest('.aplus-module') ||
-                            video.closest('[id*="brand"]')) {
-                            return;
-                        }
-
-                        // Check if video is strictly in review section
-                        if (video.closest('#customer-reviews') ||
-                            video.closest('#cm_cr-review_list') ||
-                            video.closest('[data-hook*="review"]') ||
-                            video.closest('.review')) {
-                            addReviewVideo(videoUrl);
-                        } else if (video.closest('#imageBlock') || video.closest('#altImages')) {
-                            // Only add as product video if in main product gallery
-                            addProductVideo(videoUrl);
-                        }
-                        // Otherwise, don't add - ambiguous source
-                    });
-
-                // Reset scroll state if ASIN changed
-                if (asin && asin !== lastScrapedAsin) {
-                    lastScrapedAsin = asin;
-                    hasAutoScrolled = false;
-                }
-
-                // No longer trigger scroll - data is fetched via silent API
-
-                // Background fetch across ALL variant review pages (limit increased significantly)
-                // runs ONCE per *product* on initial load (triggerScroll=true).
-                // This builds a COMMON review media pool by merging review images/videos
-                // from every known variant ASIN for this product.
-                if (onProductPage && asin && asin !== lastFetchedReviewAsin && triggerScroll) {
-                    lastFetchedReviewAsin = asin;
-
-                    // Build the set of ASINs whose review media we want to aggregate:
-                    // - The stable product-level ASIN
-                    // - Every variant ASIN discovered by scrapeVariants()
-                    const reviewAsinSet = new Set<string>();
-                    reviewAsinSet.add(asin);
-                    variants.forEach(v => {
-                        if (v.asin) {
-                            reviewAsinSet.add(v.asin);
-                        }
-                    });
-
-                    reviewAsinSet.forEach(reviewAsin => {
-                        // Run in background per ASIN - DO NOT AWAIT
-                        fetchAllReviewMedia(reviewAsin, 100).then(extra => {
-                            let hasNewMedia = false;
-                            if (extra.images.length > 0) {
-                                extra.images.forEach(img => {
-                                    const hi = toHighRes(img);
-                                    const b = getImageBase(hi);
-                                    if (!seenReviewBases.has(b)) {
-                                        seenReviewBases.add(b);
-                                        // Update global store so next scrape picks it up
-                                        prefetchedReviewImages.push(hi);
-                                        hasNewMedia = true;
+                                        // Only extract if not in promotional context
+                                        if (!isPromotionalContent(nearbyContent, slateUrl)) {
+                                            const videoMatch = nearbyContent.match(/"(?:url|videoUrl|progressiveUrl)"\s*:\s*"(https:\/\/[^"]+\.mp4[^"]*)"/);
+                                            if (videoMatch) {
+                                                addProductVideo(videoMatch[1].replace(/\\u002F/g, '/').replace(/\\/g, ''));
+                                            }
+                                        }
                                     }
                                 });
                             }
-                            if (extra.videos.length > 0) {
-                                const newVideos = extra.videos.filter(v => !prefetchedReviewVideos.includes(v));
-                                if (newVideos.length > 0) {
-                                    prefetchedReviewVideos.push(...newVideos);
-                                    hasNewMedia = true;
+                        }
+                    });
+
+                    // 2. DOM fallback for product videos (video thumbnails in product gallery)
+                    // STRICT: Only from main product image gallery, exclude promotional sections
+                    document.querySelectorAll<HTMLElement>('#imageBlock .videoThumbnail, #altImages .videoThumbnail, #main-image-container [data-video-url], .vse-video-item')
+                        .forEach((el) => {
+                            // Skip if in a promotional or "similar brands" section
+                            if (el.closest('[data-component-type*="brand"]') ||
+                                el.closest('[class*="similar-brand"]') ||
+                                el.closest('[class*="sponsored"]') ||
+                                el.closest('#similarities_feature_div') ||
+                                el.closest('#sp_detail') ||
+                                el.closest('.aplus-module')) {
+                                return;
+                            }
+
+                            const videoUrl = el.getAttribute('data-video-url') ||
+                                el.querySelector('[data-video-url]')?.getAttribute('data-video-url') ||
+                                el.getAttribute('data-vse-video-url') ||
+                                el.getAttribute('data-vse-video-progressive-url') ||
+                                el.closest('.vse-video-item')?.getAttribute('data-video-url');
+
+                            if (videoUrl && videoUrl.startsWith('http')) {
+                                addProductVideo(videoUrl);
+                            } else {
+                                // Support for encoded video JSON in thumbnails
+                                const videoData = el.getAttribute('data-a-video-data') ||
+                                    el.querySelector('[data-a-video-data]')?.getAttribute('data-a-video-data');
+                                if (videoData) {
+                                    try {
+                                        const parsed = JSON.parse(videoData);
+                                        const url = parsed.url || parsed.videoUrl || (parsed.sources && parsed.sources[0]?.url);
+                                        if (url && url.startsWith('http')) addProductVideo(url);
+                                    } catch (e) { }
                                 }
                             }
+                        });
 
-                            // Notify panel that new review media was loaded
-                            if (hasNewMedia) {
-                                console.log('AMZImage: Background review fetch complete for', reviewAsin);
-                                notifyContentChange('review_media_loaded');
+                    // 3. DOM fallback for review videos - STRICT: Only from customer reviews section
+                    const reviewVideoSelectors = [
+                        '#customer-reviews video',
+                        '#cm_cr-review_list video',
+                        '.cr-widget-FocalReviews video',
+                        '[data-hook="review-video"]',
+                        '[data-hook="review-body"] video',
+                        '.review-video-container video',
+                        '#customer-reviews [data-video-url]',
+                        '#cm_cr-review_list [data-video-url]',
+                        '.cr-media-gallery [data-video-url]',
+                        '.cr-media-gallery [data-a-video-data]',
+                        '.review-image-tile[data-video-url]'
+                    ];
+
+                    document.querySelectorAll<HTMLElement>(reviewVideoSelectors.join(', '))
+                        .forEach((el) => {
+                            let videoUrl = '';
+                            if (el.tagName.toLowerCase() === 'video') {
+                                videoUrl = (el as HTMLVideoElement).src;
+                                if (!videoUrl) {
+                                    const source = el.querySelector('source');
+                                    if (source) videoUrl = source.src;
+                                }
+                            } else {
+                                // Check for various data attributes
+                                videoUrl = el.getAttribute('data-video-url') ||
+                                    el.getAttribute('data-reorder-video-url') ||
+                                    el.getAttribute('data-video-source') || '';
+
+                                // If it's a JSON block (common in review gallery)
+                                const videoData = el.getAttribute('data-a-video-data') || el.getAttribute('data-a-player-preload');
+                                if (videoData) {
+                                    try {
+                                        const parsed = JSON.parse(videoData);
+                                        const url = parsed.url || parsed.videoUrl || (parsed.sources && parsed.sources[0]?.url) || parsed.progressiveUrl;
+                                        if (url) videoUrl = url;
+                                    } catch (e) { }
+                                }
                             }
-                        }).catch(e => {
-                            console.warn('AMZImage: Background review fetch failed for', reviewAsin, e);
+                            if (videoUrl && videoUrl.startsWith('http')) {
+                                addReviewVideo(videoUrl);
+                            }
+                        });
+
+                    // 5. FORCE SCAN: Deep scan of customer review section for ANY video data attributes
+                    // This catches custom player implementations where the data might be on a container div/span
+                    const reviewContainers = document.querySelectorAll('#customer-reviews, #cm_cr-review_list, .cr-widget-FocalReviews');
+                    reviewContainers.forEach(container => {
+                        const videoDataElements = container.querySelectorAll('[data-a-player-preload], [data-a-video-data], [data-video-url]');
+                        videoDataElements.forEach(el => {
+                            try {
+                                // Direct URL
+                                const directUrl = el.getAttribute('data-video-url');
+                                if (directUrl && directUrl.startsWith('http')) {
+                                    addReviewVideo(directUrl);
+                                }
+
+                                // JSON Data
+                                const jsonStr = el.getAttribute('data-a-player-preload') || el.getAttribute('data-a-video-data');
+                                if (jsonStr) {
+                                    const parsed = JSON.parse(jsonStr);
+                                    // Try common Amazon video JSON structures
+                                    const foundUrl = parsed.url ||
+                                        parsed.videoUrl ||
+                                        parsed.progressiveUrl ||
+                                        (parsed.sources && parsed.sources[0]?.url);
+
+                                    if (foundUrl && typeof foundUrl === 'string' && foundUrl.startsWith('http')) {
+                                        addReviewVideo(foundUrl);
+                                    }
+                                }
+                            } catch (e) { }
                         });
                     });
-                }
 
-                // Capture from any open modals or gallery state JSON
-                const modalState = document.querySelector('[data-a-modal-state]')?.getAttribute('data-a-modal-state');
-                if (modalState && (modalState.includes('review') || modalState.includes('customer'))) {
-                    const urls = modalState.match(/https:\/\/[^"'\s,\]\[\}]+\.(jpg|jpeg|png|webp)[^"'\s,\]\[\}]*/gi);
-                    if (urls) {
-                        urls.forEach(url => {
-                            const hi = toHighRes(url.replace(/\\u002F/g, '/').replace(/\\/g, ''));
-                            // Add to reviewImages if not already present
-                            const b = getImageBase(hi);
-                            if (!seenReviewBases.has(b)) {
-                                seenReviewBases.add(b);
-                                reviewImages.push(hi);
+                    // 4. Generic video fallback - STRICT categorization based on DOM location
+                    document.querySelectorAll<HTMLVideoElement>('video')
+                        .forEach((video) => {
+                            const videoUrl = video.src || video.querySelector('source')?.src;
+                            if (!videoUrl || !videoUrl.startsWith('http')) return;
+
+                            // Skip videos in promotional/similar brands sections
+                            if (video.closest('[data-component-type*="brand"]') ||
+                                video.closest('[class*="similar-brand"]') ||
+                                video.closest('[class*="sponsored"]') ||
+                                video.closest('#similarities_feature_div') ||
+                                video.closest('#sp_detail') ||
+                                video.closest('.aplus-module') ||
+                                video.closest('[id*="brand"]')) {
+                                return;
+                            }
+
+                            // Check if video is strictly in review section
+                            if (video.closest('#customer-reviews') ||
+                                video.closest('#cm_cr-review_list') ||
+                                video.closest('[data-hook*="review"]') ||
+                                video.closest('.review')) {
+                                addReviewVideo(videoUrl);
+                            } else if (video.closest('#imageBlock') || video.closest('#altImages')) {
+                                // Only add as product video if in main product gallery
+                                addProductVideo(videoUrl);
+                            }
+                            // Otherwise, don't add - ambiguous source
+                        });
+
+                    // Reset scroll state if ASIN changed
+                    if (asin && asin !== lastScrapedAsin) {
+                        lastScrapedAsin = asin;
+                        hasAutoScrolled = false;
+                    }
+
+                    // No longer trigger scroll - data is fetched via silent API
+
+                    // Background fetch across ALL variant review pages (limit increased significantly)
+                    // runs ONCE per *product* on initial load (triggerScroll=true).
+                    // This builds a COMMON review media pool by merging review images/videos
+                    // from every known variant ASIN for this product.
+                    if (onProductPage && asin && asin !== lastFetchedReviewAsin && triggerScroll) {
+                        lastFetchedReviewAsin = asin;
+
+                        // Build the set of ASINs whose review media we want to aggregate:
+                        // - The stable product-level ASIN
+                        // - Every variant ASIN discovered by scrapeVariants()
+                        const reviewAsinSet = new Set<string>();
+                        reviewAsinSet.add(asin);
+                        variants.forEach(v => {
+                            if (v.asin) {
+                                reviewAsinSet.add(v.asin);
                             }
                         });
+
+                        reviewAsinSet.forEach(reviewAsin => {
+                            // Run in background per ASIN - DO NOT AWAIT
+                            fetchAllReviewMedia(reviewAsin, 100).then(extra => {
+                                let hasNewMedia = false;
+                                if (extra.images.length > 0) {
+                                    extra.images.forEach(img => {
+                                        const hi = toHighRes(img);
+                                        const b = getImageBase(hi);
+                                        if (!seenReviewBases.has(b)) {
+                                            seenReviewBases.add(b);
+                                            // Update global store so next scrape picks it up
+                                            prefetchedReviewImages.push(hi);
+                                            hasNewMedia = true;
+                                        }
+                                    });
+                                }
+                                if (extra.videos.length > 0) {
+                                    const newVideos = extra.videos.filter(v => !prefetchedReviewVideos.includes(v));
+                                    if (newVideos.length > 0) {
+                                        prefetchedReviewVideos.push(...newVideos);
+                                        hasNewMedia = true;
+                                    }
+                                }
+
+                                // Notify panel that new review media was loaded
+                                if (hasNewMedia) {
+                                    console.log('AMZImage: Background review fetch complete for', reviewAsin);
+                                    notifyContentChange('review_media_loaded');
+                                }
+                            }).catch(e => {
+                                console.warn('AMZImage: Background review fetch failed for', reviewAsin, e);
+                            });
+                        });
+                    }
+
+                    // Capture from any open modals or gallery state JSON
+                    const modalState = document.querySelector('[data-a-modal-state]')?.getAttribute('data-a-modal-state');
+                    if (modalState && (modalState.includes('review') || modalState.includes('customer'))) {
+                        const urls = modalState.match(/https:\/\/[^"'\s,\]\[\}]+\.(jpg|jpeg|png|webp)[^"'\s,\]\[\}]*/gi);
+                        if (urls) {
+                            urls.forEach(url => {
+                                const hi = toHighRes(url.replace(/\\u002F/g, '/').replace(/\\/g, ''));
+                                // Add to reviewImages if not already present
+                                const b = getImageBase(hi);
+                                if (!seenReviewBases.has(b)) {
+                                    seenReviewBases.add(b);
+                                    reviewImages.push(hi);
+                                }
+                            });
+                        }
                     }
                 }
             }
@@ -2516,8 +2481,13 @@ export default defineContentScript({
 
             // Fallback return for non-product/listing pages
             return {
-                pageType, asin, title: title.substring(0, 120),
-                variant, variants, description: description, activeImage: '',
+                pageType,
+                asin,
+                title: title.substring(0, 120),
+                variant,
+                variants,
+                description,
+                activeImage: '',
                 productImages: [...new Set(productImages)],
                 variantImages: variantImagesMap,
                 variantImagesByAsin: variantImagesByAsin,
