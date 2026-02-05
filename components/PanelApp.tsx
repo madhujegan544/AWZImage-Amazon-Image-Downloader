@@ -559,6 +559,25 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     const productDataRef = useRef<ProductData | null>(null);
     // Cache for review media keyed by ASIN to persist across navigation
     const reviewCacheRef = useRef<Record<string, MediaItem[]>>({});
+    // Flag to track if we've loaded reviews from storage
+    const reviewStorageLoadedRef = useRef(false);
+
+    // Load cached reviews from browser.storage on initial mount
+    useEffect(() => {
+        if (reviewStorageLoadedRef.current) return;
+        reviewStorageLoadedRef.current = true;
+
+        browser.storage.local.get('reviewCache').then((result) => {
+            if (result.reviewCache && typeof result.reviewCache === 'object') {
+                reviewCacheRef.current = result.reviewCache as Record<string, MediaItem[]>;
+                // If we have a current ASIN, restore its reviews immediately
+                const currentAsin = productDataRef.current?.asin;
+                if (currentAsin && reviewCacheRef.current[currentAsin]) {
+                    setPersistentReviews(reviewCacheRef.current[currentAsin]);
+                }
+            }
+        }).catch(() => {/* ignore storage errors */ });
+    }, []);
 
     useEffect(() => {
         productDataRef.current = productData;
@@ -657,6 +676,9 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
         reviewCacheRef.current[currentAsin] = merged;
 
+        // Persist to browser.storage for cross-session persistence
+        browser.storage.local.set({ reviewCache: reviewCacheRef.current }).catch(() => {/* ignore */ });
+
         // 3. Expose the merged, product-wide review media as persistent state
         setPersistentReviews(merged);
     }, [productData]);
@@ -704,7 +726,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                         setShowAllItems(false);
                         setSelectedVariantAsin(null);
                         setVariantImagesCache({}); // Clear cached images for new product
-                        setPersistentReviews([]); // Clear persistent reviews for new product
+                        // DO NOT clear persistentReviews - reviews persist across variant changes
+                        // Reviews will be updated when new product data loads from reviewCacheRef
 
                         // Brief delay to show loading state
                         setTimeout(() => {
@@ -2101,113 +2124,106 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 borderBottom: `1px solid ${COLORS.borderLight}`,
                                 flexShrink: 0,
                                 zIndex: 40,
-                                boxShadow: '0 2px 4px rgba(0,0,0,0.02)'
+                                boxShadow: '0 4px 6px -1px rgba(0,0,0,0.03)',
+                                padding: '12px 14px',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: '12px'
                             }}>
-                                {/* ROW 1: Action Controls */}
-                                <div style={{
-                                    padding: '8px 12px',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'space-between',
-                                    gap: '8px'
-                                }}>
-                                    {/* Review Media Button (Left Aligned) */}
-                                    {persistentReviews.length > 0 && (
-                                        <button
-                                            onClick={() => setReviewSectionExpanded(true)}
-                                            style={{
-                                                padding: '8px 14px',
-                                                borderRadius: '10px',
-                                                background: COLORS.surface, // Clean white background
-                                                color: COLORS.primary, // Brand color text
-                                                border: `1.5px solid ${COLORS.primary}`, // Visible brand border
-                                                fontSize: '11px',
-                                                fontWeight: 700, // Slightly bolder for visibility
-                                                cursor: 'pointer',
-                                                display: 'flex',
-                                                alignItems: 'center',
-                                                gap: '6px',
-                                                transition: 'all 0.2s cubic-bezier(0.2, 0.8, 0.2, 1)',
-                                                transform: 'scale(1)',
-                                                whiteSpace: 'nowrap',
-                                                flexShrink: 0,
-                                                boxShadow: '0 1px 2px rgba(79, 70, 229, 0.05)' // Very subtle glow
-                                            }}
-                                            onMouseEnter={e => {
-                                                e.currentTarget.style.background = COLORS.primarySoft; // Light blue hover
-                                                e.currentTarget.style.transform = 'translateY(-1px)';
-                                                e.currentTarget.style.boxShadow = '0 4px 6px -1px rgba(79, 70, 229, 0.1)';
-                                            }}
-                                            onMouseLeave={e => {
-                                                e.currentTarget.style.background = COLORS.surface;
-                                                e.currentTarget.style.transform = 'translateY(0) scale(1)';
-                                                e.currentTarget.style.boxShadow = '0 1px 2px rgba(79, 70, 229, 0.05)';
-                                            }}
-                                            onMouseDown={e => e.currentTarget.style.transform = 'scale(0.96)'}
-                                            title="Open Review Media"
-                                        >
-                                            <div style={{
-                                                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                                color: COLORS.primary,
-                                            }}>
-                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                {/* LEVEL 1: Primary Action (Download All) */}
+                                <button
+                                    onClick={downloadAll}
+                                    disabled={downloading}
+                                    style={{
+                                        width: '100%',
+                                        padding: '10px 16px',
+                                        background: COLORS.primary,
+                                        color: '#fff',
+                                        borderRadius: '10px',
+                                        fontSize: '13px',
+                                        fontWeight: 700,
+                                        border: 'none',
+                                        cursor: downloading ? 'wait' : 'pointer',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        gap: '8px',
+                                        transition: 'all 0.2s cubic-bezier(0.2, 0.8, 0.2, 1)',
+                                        opacity: downloading ? 0.8 : 1,
+                                        boxShadow: COLORS.shadowPrimary,
+                                        letterSpacing: '0.3px'
+                                    }}
+                                    onMouseEnter={e => !downloading && (e.currentTarget.style.transform = 'translateY(-1px)')}
+                                    onMouseLeave={e => !downloading && (e.currentTarget.style.transform = 'translateY(0)')}
+                                >
+                                    {downloading ? (
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: 'spin 1.5s linear infinite' }}>
+                                            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                                        </svg>
+                                    ) : (
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+                                    )}
+                                    {downloading ? 'Preparing Download...' : `Download All (${allVariants.length} Variants)`}
+                                </button>
+
+                                {/* LEVEL 2: Section Header & Secondary Actions */}
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                    {/* Heading */}
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        <h3 style={{ fontSize: '15px', fontWeight: 800, color: COLORS.text, margin: 0, letterSpacing: '-0.3px' }}>
+                                            Product Variants
+                                        </h3>
+                                        <span style={{
+                                            fontSize: '11px', fontWeight: 600, color: COLORS.textMuted,
+                                            background: COLORS.backgroundSecondary, padding: '2px 6px', borderRadius: '4px'
+                                        }}>
+                                            {allVariants.length}
+                                        </span>
+                                    </div>
+
+                                    {/* Secondary Tools (Review Drawer + Refresh) */}
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        {/* Review Media Toggle */}
+                                        {persistentReviews.length > 0 && (
+                                            <button
+                                                onClick={() => setReviewSectionExpanded(true)}
+                                                style={{
+                                                    padding: '6px 10px',
+                                                    borderRadius: '8px',
+                                                    background: '#fff',
+                                                    color: COLORS.primary,
+                                                    border: `1px solid ${COLORS.primary}40`, // clear separation
+                                                    fontSize: '11px',
+                                                    fontWeight: 700,
+                                                    cursor: 'pointer',
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    gap: '6px',
+                                                    transition: 'all 0.2s',
+                                                }}
+                                                title="Open Review Media"
+                                            >
+                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                                                     <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
                                                 </svg>
-                                            </div>
-                                            <span>Review Media</span>
-                                            <span style={{
-                                                background: COLORS.primary,
-                                                color: '#fff', // Inverted contrast badge
-                                                fontSize: '10px',
-                                                fontWeight: 800,
-                                                padding: '2px 6px',
-                                                borderRadius: '6px',
-                                                marginLeft: '2px'
-                                            }}>{persistentReviews.length}</span>
-                                        </button>
-                                    )}
-                                    {persistentReviews.length === 0 && <div />} {/* Spacer if no reviews */}
+                                                Reviews
+                                                <span style={{
+                                                    background: COLORS.primary, color: '#fff', fontSize: '10px',
+                                                    padding: '1px 5px', borderRadius: '4px', marginLeft: '2px'
+                                                }}>{persistentReviews.length}</span>
+                                            </button>
+                                        )}
 
-                                    <div style={{ display: 'flex', gap: '8px', marginLeft: 'auto' }}>
-                                        <button
-                                            onClick={downloadAll}
-                                            disabled={downloading}
-                                            style={{
-                                                padding: '8px 16px',
-                                                background: COLORS.primary,
-                                                color: '#fff',
-                                                borderRadius: '10px',
-                                                fontSize: '12px',
-                                                fontWeight: 700,
-                                                border: 'none',
-                                                cursor: downloading ? 'wait' : 'pointer',
-                                                display: 'flex',
-                                                alignItems: 'center',
-                                                gap: '8px',
-                                                transition: 'all 0.2s',
-                                                opacity: downloading ? 0.8 : 1,
-                                                boxShadow: COLORS.shadowPrimary,
-                                                whiteSpace: 'nowrap', // Prevent wrapping
-                                                flexShrink: 0
-                                            }}
-                                        >
-                                            {downloading ? (
-                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: 'spin 1.5s linear infinite' }}>
-                                                    <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                                                </svg>
-                                            ) : (
-                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-                                            )}
-                                            {downloading ? 'Downloading...' : `Download All (${allVariants.length})`}
-                                        </button>
-
+                                        {/* Refresh Button */}
                                         <button
                                             onClick={handleRefresh}
                                             style={{
                                                 width: '28px', height: '28px', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                                background: COLORS.backgroundSecondary, borderRadius: '8px', color: COLORS.textSecondary,
-                                                border: 'none', cursor: 'pointer', transition: 'all 0.2s'
+                                                background: 'transparent', borderRadius: '8px', color: COLORS.textMuted,
+                                                border: '1px solid transparent', cursor: 'pointer', transition: 'all 0.2s'
                                             }}
+                                            onMouseEnter={e => { e.currentTarget.style.background = COLORS.backgroundSecondary; e.currentTarget.style.color = COLORS.text; }}
+                                            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = COLORS.textMuted; }}
                                             title="Refresh Data"
                                         >
                                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: loading ? 'spin 1.5s linear infinite' : 'none' }}>
@@ -2216,11 +2232,6 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                             </svg>
                                         </button>
                                     </div>
-                                </div>
-
-                                {/* ROW 2: Title Label */}
-                                <div style={{ padding: '4px 12px 10px 12px' }}>
-                                    <h3 style={{ fontSize: '14px', fontWeight: 800, color: COLORS.text, margin: 0 }}>Available Variants</h3>
                                 </div>
                             </div>
                         )}
