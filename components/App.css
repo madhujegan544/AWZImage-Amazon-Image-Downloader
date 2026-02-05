@@ -327,3 +327,29 @@ video {
 .variant-option-hover:active {
     box-shadow: var(--shadow-sm) !important;
 }
+
+/* Thumbnail Interactions */
+.variant-thumb {
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    transform-origin: center;
+    cursor: pointer;
+}
+
+.variant-thumb:hover {
+    transform: scale(1.1);
+    z-index: 10;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    border-color: var(--primary) !important;
+}
+
+.variant-show-more {
+    transition: all 0.2s ease;
+    cursor: pointer;
+}
+
+.variant-show-more:hover {
+    background: var(--surface) !important;
+    color: var(--primary) !important;
+    border-color: var(--primary) !important;
+    box-shadow: var(--shadow-sm);
+}

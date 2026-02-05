@@ -229,7 +229,7 @@ function scrapeCurrentGalleryImages(): string[] {
 /**
  * Scrapes official product videos from "Videos for this product" section
  */
-function scrapeCurrentGalleryVideos(): string[] {
+export function scrapeCurrentGalleryVideos(): string[] {
     const videos: string[] = [];
     const seenIds = new Set<string>();
 

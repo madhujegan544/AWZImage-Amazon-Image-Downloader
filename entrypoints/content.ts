@@ -13,6 +13,7 @@ import {
     scrapeAllVariantsWithMedia,
     scrapeVariantsQuick,
     getVariantMedia,
+    scrapeCurrentGalleryVideos,
     VariantItem
 } from '../utils/variantScraper';
 
@@ -233,15 +234,42 @@ export default defineContentScript({
                         }
                     });
 
-                    // Extract review videos from DOM
-                    doc.querySelectorAll('video source, [data-hook="review-video"] video, video[src]').forEach(el => {
-                        const src = (el as HTMLSourceElement).src || (el as HTMLVideoElement).src;
-                        if (src && src.startsWith('http')) {
-                            const id = getVideoId(src);
-                            if (!seenVideos.has(id)) {
-                                seenVideos.add(id);
-                                allVideos.push(src);
+                    // Extract review videos from DOM (Enhanced)
+                    const videoContainers = doc.querySelectorAll('video, [data-hook="review-video"], .video-block, .cr-video-desktop, [data-hook="review-video-cell"]');
+                    videoContainers.forEach(container => {
+                        // 1. Direct Video Tag
+                        if (container.tagName === 'VIDEO') {
+                            const src = (container as HTMLVideoElement).src || container.querySelector('source')?.src;
+                            if (src && src.startsWith('http')) {
+                                const id = getVideoId(src);
+                                if (!seenVideos.has(id)) { seenVideos.add(id); allVideos.push(src); }
                             }
+                            return;
+                        }
+
+                        // 2. Video tag inside
+                        const video = container.querySelector('video');
+                        if (video) {
+                            const src = video.src || video.querySelector('source')?.src;
+                            if (src && src.startsWith('http')) {
+                                const id = getVideoId(src);
+                                if (!seenVideos.has(id)) { seenVideos.add(id); allVideos.push(src); }
+                            }
+                        }
+
+                        // 3. Data attributes
+                        const dataUrl = container.getAttribute('data-video-url');
+                        if (dataUrl && dataUrl.startsWith('http')) {
+                            const id = getVideoId(dataUrl);
+                            if (!seenVideos.has(id)) { seenVideos.add(id); allVideos.push(dataUrl); }
+                        }
+
+                        // 4. Input values
+                        const input = container.querySelector('input[type="hidden"][value*=".mp4"]');
+                        if (input && (input as HTMLInputElement).value) {
+                            const val = (input as HTMLInputElement).value;
+                            const id = getVideoId(val);
+                            if (!seenVideos.has(id)) { seenVideos.add(id); allVideos.push(val); }
                         }
                     });
 
@@ -605,6 +633,17 @@ export default defineContentScript({
                         });
                     }
                 });
+
+                // FALLBACK: Ensure current page videos are captured even if variant mapping failed
+                if (videos.length === 0) {
+                    const directVideos = scrapeCurrentGalleryVideos();
+                    if (directVideos.length > 0) {
+                        console.log('AMZImage: Recovered', directVideos.length, 'videos from direct scrape');
+                        directVideos.forEach(v => {
+                            if (!videos.includes(v)) videos.push(v);
+                        });
+                    }
+                }
 
                 // ============================================
                 // REVIEW MEDIA EXTRACTION (Customer Content Only)
@@ -1260,19 +1299,17 @@ export default defineContentScript({
 
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', () => {
-                setTimeout(setupVariantObserver, 500);
-                setTimeout(prefetchReviewMedia, 1000);
-                // Pre-load all variant media immediately
+                setTimeout(setupVariantObserver, 100);
+                prefetchReviewMedia(); // Immediate trigger
                 if (isProductPage()) {
-                    setTimeout(() => loadAllVariantMedia(), 200);
+                    loadAllVariantMedia(); // Immediate
                 }
             });
         } else {
-            setTimeout(setupVariantObserver, 500);
-            setTimeout(prefetchReviewMedia, 1000);
-            // Pre-load all variant media immediately
+            setTimeout(setupVariantObserver, 100);
+            prefetchReviewMedia(); // Immediate trigger
             if (isProductPage()) {
-                setTimeout(() => loadAllVariantMedia(), 200);
+                loadAllVariantMedia(); // Immediate
             }
         }
 
