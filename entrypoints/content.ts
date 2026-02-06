@@ -104,6 +104,29 @@ export default defineContentScript({
         }
 
         function getProductReviewAsin(): string {
+            // 1. Try to get specific review ASIN from the link if it exists (for aggregated reviews)
+            const reviewLink = document.querySelector('[data-hook="see-all-reviews-link-foot"]');
+            if (reviewLink) {
+                const href = reviewLink.getAttribute('href');
+                const match = href?.match(/\/product-reviews\/([A-Z0-9]{10})/);
+                if (match) {
+                    productReviewAsin = match[1];
+                    return match[1];
+                }
+            }
+
+            // 2. Try generic review link if data-hook is missing (common on JP/DE)
+            const anyReviewLink = document.querySelector('a[href*="/product-reviews/"]');
+            if (anyReviewLink) {
+                const href = anyReviewLink.getAttribute('href');
+                const match = href?.match(/\/product-reviews\/([A-Z0-9]{10})/);
+                if (match) {
+                    productReviewAsin = match[1];
+                    return match[1];
+                }
+            }
+
+            // 3. Fallback to current
             if (productReviewAsin) return productReviewAsin;
             const current = getCurrentAsin();
             if (current) {
@@ -202,7 +225,7 @@ export default defineContentScript({
         // REVIEW MEDIA FETCHING (Separate from Product Gallery)
         // ============================================
 
-        async function fetchAllReviewMedia(asin: string, limit: number = 100): Promise<{ images: string[], videos: string[] }> {
+        async function fetchAllReviewMedia(asin: string, limit: number = 100, onProgress?: (imgs: string[], vids: string[]) => void): Promise<{ images: string[], videos: string[] }> {
             const allImages: string[] = [];
             const allVideos: string[] = [];
             const seenImages = new Set<string>();
@@ -299,6 +322,9 @@ export default defineContentScript({
 
                     // Check for more pages
                     const hasNext = doc.querySelector('.a-pagination .a-last:not(.a-disabled)') !== null;
+                    if (onProgress) {
+                        onProgress([...allImages], [...allVideos]);
+                    }
                     if (!hasNext) break;
 
                 } catch (e) {
@@ -319,7 +345,16 @@ export default defineContentScript({
             prefetchedAsin = asin;
 
             try {
-                const extra = await fetchAllReviewMedia(asin, 100);
+                // Pass incremental callback to update UI as we find images
+                const extra = await fetchAllReviewMedia(asin, 100, (imgs, vids) => {
+                    if (imgs.length > prefetchedReviewImages.length || vids.length > prefetchedReviewVideos.length) {
+                        prefetchedReviewImages = imgs;
+                        prefetchedReviewVideos = vids;
+                        notifyContentChange('prefetch_update');
+                    }
+                });
+
+                // Final update
                 prefetchedReviewImages = extra.images;
                 prefetchedReviewVideos = extra.videos;
 
@@ -604,10 +639,10 @@ export default defineContentScript({
                 }
 
                 // Update current ASIN's selected state
-                const currentAsin = getCurrentAsin();
+                const activeAsinForVariant = getCurrentAsin();
                 variants = variants.map(v => ({
                     ...v,
-                    selected: v.asin === currentAsin
+                    selected: v.asin === activeAsinForVariant
                 }));
 
                 // Build variant maps and populate main gallery from selected variant

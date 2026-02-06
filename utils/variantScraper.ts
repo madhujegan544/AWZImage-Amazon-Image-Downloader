@@ -200,16 +200,53 @@ function scrapeCurrentGalleryImages(): string[] {
         }
     }
 
-    // Strategy 2: Alt Images thumbnails (Visible in gallery)
+    // Strategy 2: ImageBlockATF & colorImages (Scoped to Current ASIN)
+    // We strictly look for "initial" or matching ASIN keys to avoid grabbing ALL variant images
+    const currentAsin = getCurrentAsin();
+    for (const script of Array.from(scripts)) {
+        const content = script.textContent || '';
+        if (content.includes('ImageBlockATF') || content.includes('colorImages')) {
+            // Pattern to find "initial": [...] or "ASIN": [...] blocks
+            // This prevents reading the entire script which contains all variants
+            const patterns = [
+                /"initial"\s*:\s*(\[[\s\S]*?\])(?=\s*[,}])/i,
+                /'initial'\s*:\s*(\[[\s\S]*?\])(?=\s*[,}])/i,
+                new RegExp(`"${currentAsin}"\\s*:\\s*(\\[[\\s\\S]*?\\])(?=\\s*[,}])`),
+                new RegExp(`'${currentAsin}'\\s*:\\s*(\\[[\\s\\S]*?\\])(?=\\s*[,}])`)
+            ];
+
+            let foundBlock = false;
+            for (const pattern of patterns) {
+                const match = content.match(pattern);
+                if (match) {
+                    const blockContent = match[1];
+                    // Now safely extract hiRes from ONLY this block
+                    const hiResMatches = blockContent.match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/g);
+                    if (hiResMatches) {
+                        hiResMatches.forEach(m => {
+                            const urlMatch = m.match(/"(https:\/\/[^"]+)"/);
+                            if (urlMatch) {
+                                addImage(urlMatch[1]);
+                                foundBlock = true;
+                            }
+                        });
+                    }
+                    if (foundBlock) break; // Found the correct block, stop searching this script
+                }
+            }
+        }
+    }
+
+    // Strategy 3: Alt Images thumbnails (Visible in gallery)
     document.querySelectorAll('#altImages ul li.item img').forEach(img => {
         addImage((img as HTMLImageElement).src);
     });
 
-    // Strategy 3: Main landing image
+    // Strategy 4: Main landing image
     const mainImg = document.querySelector('#landingImage, #imgTagWrapperId img') as HTMLImageElement;
     if (mainImg?.src) addImage(mainImg.src);
 
-    // Strategy 4: data-a-dynamic-image attribute (High-res candidates)
+    // Strategy 5: data-a-dynamic-image attribute (High-res candidates)
     const dynamicContainers = document.querySelectorAll(
         '#main-image-container, #landingImage, #imgTagWrapperId, .imgTagWrapper, #imageBlock'
     );
