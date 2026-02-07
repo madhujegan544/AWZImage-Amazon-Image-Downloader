@@ -97,7 +97,7 @@ const COLORS = {
     accent: '#6366F1',
 };
 
-const INITIAL_ITEMS_COUNT = 6;
+const INITIAL_ITEMS_COUNT = 15;
 
 // ============================================
 // Utility Functions
@@ -189,10 +189,8 @@ const enrichProductData = (data: ProductData | null): ProductData | null => {
         return {
             ...v,
             images: images.length > 0 ? images : dedupeUrls(v.images || []),
-            // Prefer variant-specific videos, but fallback to page videos for the active variant if missing
-            videos: (v.videos && v.videos.length > 0)
-                ? v.videos
-                : ((v.selected || v.asin === data.asin) ? (data.videos || []) : []),
+            // Only use variant-specific videos
+            videos: v.videos || [],
             // Update thumbnail if we found a better gallery
             image: images[0] || v.image
         };
@@ -220,8 +218,9 @@ const getMediaItems = (data: ProductData | null, overrideAsin?: string | null): 
         }
     };
 
-    // Determine which product images to show
+    // Determine which product images and videos to show
     let displayImages: string[] = [];
+    let displayVideos: string[] = [];
 
     // PRIORITY 0: Check override ASIN first (user clicked in panel)
     let selectedVariant = overrideAsin
@@ -259,23 +258,35 @@ const getMediaItems = (data: ProductData | null, overrideAsin?: string | null): 
                 displayImages = data.variantImages[matchingKey];
             }
         }
+
+        // VIDEO RESOLUTION: Use variant-specific videos when available
+        // This is critical - we must use the selectedVariant's videos, NOT the default product videos
+        if (selectedVariant.videos && selectedVariant.videos.length > 0) {
+            displayVideos = selectedVariant.videos;
+        } else {
+            // If the variant has no specific videos, keep it empty to prevent "bleed-over" from other variants
+            displayVideos = [];
+        }
     }
 
-    // FALLBACK: If no variant is selected OR no variant images found
+    // FALLBACK: Strict enforcement for variants
     if (displayImages.length === 0) {
         if (!hasVariants) {
-            // No variants exist at all - safe to use productImages
+            // No variants exist (standard single product) - use official product images
             displayImages = data.productImages || [];
         } else if (selectedVariant) {
-            // There ARE variants but we couldn't find images for the selected one
-            // ONLY use the variant's thumbnail - NEVER fall back to productImages
-            // as it may contain images from other variants
+            // Variant is selected but no full gallery found yet - ONLY use high-res thumbnail
+            // Never fall back to global productImages as they may belong to other variants
             if (selectedVariant.image) {
                 displayImages = [selectedVariant.image];
             }
-            // If no thumbnail either, display will be empty (better than showing wrong images)
         }
-        // If no variant selected but variants exist, show nothing (user should select one)
+        // If variants exist but none selected, display remains empty until selection
+    }
+
+    // FALLBACK: If no variant is selected, use default product videos
+    if (displayVideos.length === 0 && !hasVariants) {
+        displayVideos = data.productVideos || data.videos || [];
     }
 
     // Dedupe the display images
@@ -285,7 +296,8 @@ const getMediaItems = (data: ProductData | null, overrideAsin?: string | null): 
         addItem(url, 'image', 'product', 'productImage');
     });
 
-    (data.productVideos || data.videos || []).forEach(url => {
+    // Use the variant-specific videos (displayVideos) instead of always using data.productVideos/data.videos
+    displayVideos.forEach(url => {
         addItem(url, 'video', 'product', 'productVideo');
     });
 
@@ -335,6 +347,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     const [selectedVariantAsin, setSelectedVariantAsin] = useState<string | null>(null);
     // Per-ASIN cache for variant images - preserves correct images for ALL variants across selections
     const [variantImagesCache, setVariantImagesCache] = useState<Record<string, string[]>>({});
+    // Per-ASIN cache for variant videos - preserves correct videos for ALL variants across selections
+    const [variantVideosCache, setVariantVideosCache] = useState<Record<string, string[]>>({});
     // Separate sub-tab state for the review section (images/videos)
     const [reviewSubTab, setReviewSubTab] = useState<'images' | 'videos'>('images');
     // Persistent Reviews State - Stores review media from the FIRST load of the product
@@ -343,24 +357,30 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
     // Derived state
     // Use selectedVariantAsin to override default selection logic
-    // When variantImagesCache has images for the selected variant, prioritize it over freshly scraped data
+    // When variantImagesCache/variantVideosCache has media for the selected variant, prioritize it over freshly scraped data
     const allMediaItems = useMemo(() => {
         const cachedImages = selectedVariantAsin ? variantImagesCache[selectedVariantAsin] : null;
-        // If we have cached images for the selected variant, use a modified data object
-        if (selectedVariantAsin && cachedImages && cachedImages.length > 0 && productData) {
-            // Create a modified version of productData with the cached images
+        const cachedVideos = selectedVariantAsin ? variantVideosCache[selectedVariantAsin] : null;
+        // If we have cached images OR videos for the selected variant, use a modified data object
+        if (selectedVariantAsin && (cachedImages || cachedVideos) && productData) {
+            // Create a modified version of productData with the cached media
             const modifiedData = {
                 ...productData,
                 variants: productData.variants?.map(v =>
                     v.asin === selectedVariantAsin
-                        ? { ...v, images: cachedImages, selected: true }
+                        ? {
+                            ...v,
+                            images: cachedImages || v.images,
+                            videos: cachedVideos || v.videos,
+                            selected: true
+                        }
                         : { ...v, selected: false }
                 )
             };
             return getMediaItems(modifiedData, selectedVariantAsin);
         }
         return getMediaItems(productData, selectedVariantAsin);
-    }, [productData, selectedVariantAsin, variantImagesCache]);
+    }, [productData, selectedVariantAsin, variantImagesCache, variantVideosCache]);
     const isProductPage = productData?.pageType === 'product';
     const isListingPage = productData?.pageType === 'listing';
 
@@ -600,6 +620,28 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 // Enrich all variant cards with their specific images in background
                 const enrichedData = enrichProductData(rawData);
 
+                // CACHE ALL VARIANTS ON INITIAL LOAD
+                // This ensures all variants preserve their media and don't need refresh on selection
+                if (enrichedData?.variants && enrichedData.variants.length > 0) {
+                    const newImageCache: Record<string, string[]> = {};
+                    const newVideoCache: Record<string, string[]> = {};
+
+                    enrichedData.variants.forEach(variant => {
+                        // Cache images if we have them (or preserve empty state)
+                        if (variant.images) {
+                            newImageCache[variant.asin] = [...variant.images];
+                        }
+                        // Cache videos if we have them (including empty arrays to prevent bleed-over)
+                        if (variant.videos) {
+                            newVideoCache[variant.asin] = [...variant.videos];
+                        }
+                    });
+
+                    // Merge with existing cache (preserve user selections)
+                    setVariantImagesCache(prev => ({ ...newImageCache, ...prev }));
+                    setVariantVideosCache(prev => ({ ...newVideoCache, ...prev }));
+                }
+
                 // CHECK: Should we ignore this update? (Background updates only)
                 if (!triggerScroll && productDataRef.current) {
                     const currentData = productDataRef.current;
@@ -726,9 +768,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                         setIsSelectionMode(false);
                         setShowAllItems(false);
                         setSelectedVariantAsin(null);
-                        setShowAllItems(false);
-                        setSelectedVariantAsin(null);
                         setVariantImagesCache({}); // Clear cached images for new product
+                        setVariantVideosCache({}); // Clear cached videos for new product
                         // DO NOT clear persistentReviews - reviews persist across variant changes
                         // Reviews will be updated when new product data loads from reviewCacheRef
 
@@ -745,20 +786,37 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             // So we explicitly IGNORE this update to keep the panel locked to the previous variant.
                         } else {
                             // Same product update
-                            // STRICT MODE: If we have a selected variant and cached images for it,
-                            // we MUST enforce those cached images to prevent background pollution.
-                            if (selectedVariantAsin && variantImagesCache[selectedVariantAsin]) {
-                                const enforcedImages = variantImagesCache[selectedVariantAsin];
-                                if (enforcedImages && enforcedImages.length > 0) {
-                                    if (enrichedNewData) {
-                                        enrichedNewData.productImages = [...enforcedImages];
-                                        // Also update the variant object itself within the new data
-                                        enrichedNewData.variants = enrichedNewData.variants?.map(v => {
-                                            if (v.asin === selectedVariantAsin) {
-                                                return { ...v, images: enforcedImages, image: enforcedImages[0] };
-                                            }
-                                            return v;
-                                        }) || [];
+                            // STRICT MODE: Preserve ALL variants from cache to prevent any re-enrichment
+                            if (enrichedNewData && enrichedNewData.variants) {
+                                const existingVariants = productDataRef.current?.variants || [];
+
+                                // Preserve all variants from cache or existing state
+                                enrichedNewData.variants = enrichedNewData.variants.map(v => {
+                                    const cachedImages = variantImagesCache[v.asin];
+                                    const cachedVideos = variantVideosCache[v.asin];
+                                    const existingVariant = existingVariants.find(ev => ev.asin === v.asin);
+
+                                    // Use cached data first, then existing, then scraped
+                                    // Use '??' to allow empty arrays to be used
+                                    return {
+                                        ...v,
+                                        images: cachedImages ?? existingVariant?.images ?? v.images,
+                                        image: cachedImages ? cachedImages[0] : (existingVariant?.image ?? v.image),
+                                        videos: cachedVideos ?? existingVariant?.videos ?? v.videos,
+                                        selected: v.asin === selectedVariantAsin || v.selected
+                                    };
+                                });
+
+                                // If there's a selected variant, sync main product media
+                                if (selectedVariantAsin) {
+                                    const selectedVariant = enrichedNewData.variants.find(v => v.asin === selectedVariantAsin);
+                                    if (selectedVariant) {
+                                        if (selectedVariant.images && selectedVariant.images.length > 0) {
+                                            enrichedNewData.productImages = [...selectedVariant.images];
+                                        }
+                                        if (selectedVariant.videos && selectedVariant.videos.length > 0) {
+                                            enrichedNewData.videos = [...selectedVariant.videos];
+                                        }
                                     }
                                 }
                             }
@@ -779,8 +837,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         }, 1500); // Fast polling every 1.5 seconds
 
         return () => clearInterval(fastPollInterval);
-        return () => clearInterval(fastPollInterval);
-    }, [selectingVariant, productData?.asin, productData?.pageType, scrapeProductData]); // Removed downloading from deps
+    }, [selectingVariant, productData?.asin, productData?.pageType, scrapeProductData, selectedVariantAsin, variantImagesCache, variantVideosCache]); // Added cache deps
 
     // Check for Amazon Page Context
     useEffect(() => {
@@ -891,11 +948,6 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         }
 
         setSelectedVariantAsin(asin);
-
-        if (variantImages && variantImages.length > 0) {
-            setVariantImagesCache(prev => ({ ...prev, [asin]: [...variantImages] }));
-        }
-
         setSelectingVariant(true);
         setVariantDropdownOpen(false);
 
@@ -907,36 +959,61 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
                 const pollData = async () => {
                     attempts++;
-                    await new Promise(r => setTimeout(r, 800));
+                    // Faster interval for automatic sync (400ms instead of 800ms)
+                    await new Promise(r => setTimeout(r, 400));
                     try {
                         const newData = await scrapeProductData(false);
                         if (newData) {
                             const enrichedData = enrichProductData(newData);
-                            const newVariant = enrichedData?.variants?.find(v => v.selected);
+                            const newVariant = enrichedData?.variants?.find(v => v.asin === asin || v.selected);
 
                             if (newVariant?.asin === asin) {
-                                // Enforce images AND videos (persist known correct data)
-                                let imgsToEnforce = variantImagesCache[asin] || variantImages;
-                                let vidsToEnforce = variantVideos;
+                                // AUTHORITY SYNC: Trust the live website gallery above all else
+                                // enrichedData already contains fresh images from scrapeCurrentGalleryImages()
+                                const officialImages = newVariant.images || [];
 
                                 if (enrichedData && enrichedData.variants) {
+                                    const existingVariants = productDataRef.current?.variants || [];
+
                                     enrichedData.variants = enrichedData.variants.map(v => {
-                                        if (v.asin !== asin) return v;
+                                        if (v.asin === asin) {
+                                            // 1. Force the official set from the website gallery
+                                            const finalImages = [...officialImages];
 
-                                        const enforcedImages = (imgsToEnforce && imgsToEnforce.length > 0) ? imgsToEnforce : v.images;
-                                        const enforcedVideos = (vidsToEnforce && vidsToEnforce.length > 0) ? vidsToEnforce : v.videos;
+                                            // 2. Lock this into cache immediately
+                                            setVariantImagesCache(prev => ({ ...prev, [asin]: [...finalImages] }));
 
-                                        // Strict Sync: Ensure main product images match this variant only
-                                        if (enrichedData && enforcedImages && enforcedImages.length > 0) {
-                                            enrichedData.productImages = [...enforcedImages];
+                                            // 3. Sync main gallery images
+                                            if (enrichedData && finalImages.length > 0) {
+                                                enrichedData.productImages = [...finalImages];
+                                            }
+
+                                            // 4. Preserve Video Sector (Existing logic is right)
+                                            let vidsToEnforce = variantVideosCache[asin] ?? v.videos;
+                                            if (enrichedData && vidsToEnforce && vidsToEnforce.length > 0) {
+                                                enrichedData.videos = [...vidsToEnforce];
+                                            }
+
+                                            return {
+                                                ...v,
+                                                images: finalImages,
+                                                image: finalImages.length > 0 ? finalImages[0] : v.image,
+                                                videos: vidsToEnforce,
+                                                selected: true
+                                            };
+                                        } else {
+                                            // Preserve other variants
+                                            const existingVariant = existingVariants.find(ev => ev.asin === v.asin);
+                                            if (existingVariant) {
+                                                return {
+                                                    ...existingVariant,
+                                                    images: variantImagesCache[v.asin] ?? existingVariant.images,
+                                                    videos: variantVideosCache[v.asin] ?? existingVariant.videos,
+                                                    selected: false
+                                                };
+                                            }
+                                            return { ...v, selected: false };
                                         }
-
-                                        return {
-                                            ...v,
-                                            images: enforcedImages,
-                                            image: (enforcedImages && enforcedImages.length > 0) ? enforcedImages[0] : v.image,
-                                            videos: enforcedVideos
-                                        };
                                     });
                                 }
                                 setProductData(enrichedData);
@@ -1048,15 +1125,66 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 items.push({ url: item.url, filename: `Reviews/${subTab}/${item.type}_${i + 1}.${ext}` });
             });
         } else {
-            items = isProductPage ? filteredMediaItems.map(i => i.url) : filteredListingProducts.map(p => p.image);
+            if (!isProductPage) {
+                // Listing Page: Use selected items if any, otherwise all filtered items
+                if (selectedItems.size > 0) {
+                    items = Array.from(selectedItems);
+                } else {
+                    items = filteredListingProducts.map(p => p.image);
+                }
+            } else {
+                items = filteredMediaItems.map(i => i.url);
+            }
         }
 
         if (items.length === 0) { setDownloadingAsin(null); return; }
 
         try {
-            const finalFilename = `pixora-${productData.asin || 'media'}-${categoryLabel}-${Date.now()}`;
-            // Download ZIP
-            await downloadZip(items, finalFilename);
+            const baseFilename = `pixora-${productData.asin || 'media'}-${categoryLabel}-${Date.now()}`;
+
+            // CHUNKING LOGIC: Group into batches to avoid browser/memory crashes
+            // Limit: ~80 files OR ~230MB estimated (25MB per video, 1MB per image)
+            const batches: (string | { url: string; filename: string })[][] = [];
+            let currentBatch: (string | { url: string; filename: string })[] = [];
+            let currentBatchCount = 0;
+            let currentBatchSizeEst = 0;
+
+            const MAX_FILES_PER_ZIP = 80;
+            const MAX_MB_PER_ZIP = 230;
+
+            items.forEach((item) => {
+                const url = typeof item === 'string' ? item : item.url;
+                const isVideo = /\.(mp4|webm|m3u8|mov|avi)(\?|$)/i.test(url);
+                const estSize = isVideo ? 25 : 1; // Estimated MB
+
+                if (currentBatchCount + 1 > MAX_FILES_PER_ZIP || currentBatchSizeEst + estSize > MAX_MB_PER_ZIP) {
+                    if (currentBatch.length > 0) {
+                        batches.push(currentBatch);
+                        currentBatch = [];
+                        currentBatchCount = 0;
+                        currentBatchSizeEst = 0;
+                    }
+                }
+
+                currentBatch.push(item);
+                currentBatchCount += 1;
+                currentBatchSizeEst += estSize;
+            });
+
+            if (currentBatch.length > 0) {
+                batches.push(currentBatch);
+            }
+
+            // Process batches sequentially to respect sequential memory use
+            for (let i = 0; i < batches.length; i++) {
+                const batchItems = batches[i];
+                const batchSuffix = batches.length > 1 ? `-batch${i + 1}` : '';
+                const finalFilename = `${baseFilename}${batchSuffix}`;
+
+                // Download individual ZIP batch
+                await downloadZip(batchItems, finalFilename);
+            }
+
             if (currentAsin === productDataRef.current?.asin) {
                 setDownloadSuccess(true);
                 setTimeout(() => setDownloadSuccess(false), 3000);
@@ -1127,29 +1255,71 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         setIsSelectionMode(false);
     };
 
-    const handleRefresh = () => {
-        // Reset selection state
+    const handleRefresh = async () => {
+        // SMART SYNC: If a variant is selected, perform a fast "Repair & Sync"
+        if (isProductPage && selectedVariantAsin) {
+            try {
+                // Use a non-blocking scrape (no 'loading' state for seamless experience)
+                const rawData = await scrapeProductData(false);
+                if (rawData) {
+                    const enrichedData = enrichProductData(rawData);
+
+                    if (enrichedData) {
+                        const officialVariant = enrichedData.variants?.find(v => v.asin === selectedVariantAsin);
+
+                        if (officialVariant) {
+                            const newImages = officialVariant.images || [];
+
+                            // 1. Precise Cache Sync (Authority Fix) - IMAGES ONLY
+                            setVariantImagesCache(prev => ({ ...prev, [selectedVariantAsin]: [...newImages] }));
+
+                            // 2. Immediate UI Patch (No Delay) - IMAGES ONLY
+                            setProductData(prev => {
+                                if (!prev || !prev.variants) return prev;
+                                const updatedVariants = prev.variants.map(v =>
+                                    v.asin === selectedVariantAsin
+                                        ? { ...v, images: [...newImages] }
+                                        : v
+                                );
+
+                                return {
+                                    ...prev,
+                                    variants: updatedVariants,
+                                    // If this is the active selected variant, sync main gallery images
+                                    productImages: (selectedVariantAsin === prev.asin) ? [...newImages] : prev.productImages
+                                };
+                            });
+
+                            // Smart Refresh is done - no need for full reset/load
+                            return;
+                        }
+                    }
+                }
+            } catch (err) {
+                console.warn('Smart sync failed, falling back to full refresh:', err);
+            }
+        }
+
+        // Standard Full Refresh (If no variant selected or smart sync failed)
         setSelectedItems(new Set());
         setIsSelectionMode(false);
-
-        // Reset search state
         setSearchTerm('');
         setActiveSearchTerm('');
-
-        // Reset category/tab state to initial values
         setMainTab('product');
         setSubTab('images');
         setShowAllItems(false);
 
-        // Reset variant state completely
-        setSelectedVariantAsin(null);
-        setVariantImagesCache({}); // Clear cached images on refresh
-        setPersistentReviews([]); // Clear persistent reviews on refresh
+        // Reset variant state if needed
+        if (!selectedVariantAsin) {
+            setVariantImagesCache({});
+            setVariantVideosCache({});
+        }
+
+        setPersistentReviews([]);
         setVariantDropdownOpen(false);
         setSelectingVariant(false);
         setVariantStartIndex(0);
 
-        // Reload data WITH loading state (force scroll/visual feedback)
         loadData(true);
     };
 
@@ -1212,53 +1382,65 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     </div>
                 </div>
 
-                <div style={{ padding: '10px', display: 'flex', flexDirection: 'column', gap: '6px', flex: 1 }}>
-                    <h4 style={{
-                        fontSize: '14px', // Match Variant Title
-                        fontWeight: 700,
-                        color: COLORS.text,
-                        margin: 0,
-                        display: '-webkit-box',
-                        WebkitLineClamp: 2,
-                        WebkitBoxOrient: 'vertical',
-                        overflow: 'hidden',
-                        height: 'auto',
-                        lineHeight: '1.4'
-                    }}>
-                        {product.title}
-                    </h4>
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 'auto', paddingTop: '4px' }}>
-                        <span style={{
-                            fontSize: '10px', // Match Variant ASIN
+                <div style={{ padding: '12px', display: 'flex', flexDirection: 'column', gap: '8px', flex: 1 }}>
+                    <div style={{ flex: 1 }}>
+                        <h4 style={{
+                            fontSize: '14px',
+                            fontWeight: 700,
+                            color: COLORS.text,
+                            margin: 0,
+                            display: '-webkit-box',
+                            WebkitLineClamp: 2,
+                            WebkitBoxOrient: 'vertical',
+                            overflow: 'hidden',
+                            lineHeight: '1.4'
+                        }}>
+                            {product.title}
+                        </h4>
+                        <div style={{
+                            fontSize: '10px',
                             color: COLORS.textMuted,
                             fontWeight: 600,
+                            marginTop: '2px',
                             textTransform: 'uppercase',
                             letterSpacing: '0.3px',
-                            background: 'transparent',
-                            padding: 0
-                        }}>ASIN: {product.asin}</span>
+                            opacity: 0.7
+                        }}>
+                            ASIN: {product.asin}
+                        </div>
+                    </div>
 
+                    <div style={{ marginTop: '4px' }}>
                         <button
                             onClick={(e) => { e.stopPropagation(); downloadSingle(product.image); }}
                             style={{
-                                width: '28px',
-                                height: '28px',
-                                background: 'transparent',
-                                borderRadius: '6px',
-                                border: `1px solid ${COLORS.borderLight}`,
-                                color: COLORS.textSecondary,
+                                width: '100%',
+                                background: COLORS.primarySoft,
+                                borderRadius: '8px',
+                                border: 'none',
+                                color: COLORS.primary,
+                                padding: '6px 0',
                                 cursor: 'pointer',
                                 display: 'flex',
                                 alignItems: 'center',
                                 justifyContent: 'center',
+                                gap: '6px',
+                                fontSize: '11px',
+                                fontWeight: 700,
                                 transition: 'all 0.2s'
                             }}
-                            onMouseEnter={e => { e.currentTarget.style.borderColor = COLORS.primary; e.currentTarget.style.color = COLORS.primary; }}
-                            onMouseLeave={e => { e.currentTarget.style.borderColor = COLORS.borderLight; e.currentTarget.style.color = COLORS.textSecondary; }}
+                            onMouseEnter={e => {
+                                e.currentTarget.style.background = COLORS.primary;
+                                e.currentTarget.style.color = '#fff';
+                            }}
+                            onMouseLeave={e => {
+                                e.currentTarget.style.background = COLORS.primarySoft;
+                                e.currentTarget.style.color = COLORS.primary;
+                            }}
                             title="Download Image"
                         >
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+                            Download
                         </button>
                     </div>
                 </div>
@@ -1426,16 +1608,12 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             <div style={{
                 display: 'flex',
                 background: COLORS.surface,
-                padding: '0 12px',
+                padding: '0 16px', // Standardized padding
                 borderBottom: `1px solid ${COLORS.border}`,
-                gap: '8px',
+                gap: '20px', // More breathing room
                 flexShrink: 0,
                 zIndex: 30,
-                flexWrap: 'nowrap',
-                overflowX: 'auto',
-                scrollbarWidth: 'none',
-                msOverflowStyle: 'none',
-                height: '44px' // Consistent height
+                height: '48px'
             }}>
                 {tabs.map((tab) => {
                     const isActive = mainTab === tab.id;
@@ -1453,9 +1631,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             style={{
                                 display: 'flex',
                                 alignItems: 'center',
-                                gap: '8px',
-                                padding: '0 12px',
-                                borderBottom: `3px solid ${isActive ? COLORS.primary : 'transparent'}`,
+                                gap: '6px', // Consistent with global header
+                                borderBottom: `2.5px solid ${isActive ? COLORS.primary : 'transparent'}`,
                                 color: isActive ? COLORS.primary : COLORS.textSecondary,
                                 cursor: 'pointer',
                                 transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
@@ -1465,30 +1642,29 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 height: '100%'
                             }}
                         >
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={isActive ? "2.8" : "2.2"}>
+                            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={isActive ? "2.5" : "2"}>
                                 <path d={tab.icon} />
                             </svg>
                             <span style={{
-                                fontSize: '13.5px',
+                                fontSize: '13px',
                                 fontWeight: isActive ? 700 : 500,
-                                letterSpacing: '-0.1px',
-                                opacity: isActive ? 1 : 0.8
                             }}>
                                 {tab.label}
                             </span>
                             {count > 0 && (
                                 <span style={{
                                     fontSize: '10px',
-                                    background: isActive ? COLORS.primary : COLORS.backgroundSecondary,
-                                    color: isActive ? '#fff' : COLORS.textSecondary,
-                                    minWidth: '18px',
+                                    background: isActive ? COLORS.primarySoft : COLORS.backgroundSecondary,
+                                    color: isActive ? COLORS.primary : COLORS.textSecondary,
+                                    minWidth: '20px',
                                     height: '18px',
-                                    borderRadius: '9px',
+                                    padding: '0 6px',
+                                    borderRadius: '10px',
                                     display: 'flex',
                                     alignItems: 'center',
                                     justifyContent: 'center',
                                     fontWeight: 700,
-                                    marginLeft: '2px'
+                                    marginLeft: '4px'
                                 }}>
                                     {count}
                                 </span>
@@ -1511,9 +1687,9 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
-                padding: '0 16px',
-                height: '42px',
-                background: COLORS.backgroundSecondary, // Softer background
+                padding: '0 16px', // Standardized padding
+                height: '46px',
+                background: COLORS.background, // Match main background for seamless look
                 borderBottom: `1px solid ${COLORS.border}`,
                 flexShrink: 0,
                 zIndex: 40
@@ -1521,19 +1697,20 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 {/* Left Side: Stats or Toggles */}
                 <div style={{ display: 'flex', alignItems: 'center' }}>
                     {isVariantView ? (
-                        <div style={{ fontSize: '12px', fontWeight: 600, color: COLORS.textSecondary, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>
-                                <span>{allVariants.reduce((acc, v) => acc + (v.images?.length || 0), 0)} Images</span>
+                        <div style={{ fontSize: '12px', fontWeight: 600, color: COLORS.textSecondary, display: 'flex', alignItems: 'center', gap: '14px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ opacity: 0.7 }}><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>
+                                <span>Images</span>
+                                <span style={{ color: COLORS.text, fontWeight: 700 }}>{allVariants.reduce((acc, v) => acc + (v.images?.length || 0), 0)}</span>
                             </div>
-                            <span style={{ color: COLORS.borderLight, fontSize: '10px' }}>|</span>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polygon points="23 7 16 12 23 17 23 7" /><rect x="1" y="5" width="15" height="14" rx="2" ry="2" /></svg>
-                                <span>{allVariants.reduce((acc, v) => acc + (v.videos?.length || 0), 0)} Videos</span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ opacity: 0.7 }}><polygon points="23 7 16 12 23 17 23 7" /><rect x="1" y="5" width="15" height="14" rx="2" ry="2" /></svg>
+                                <span>Videos</span>
+                                <span style={{ color: COLORS.text, fontWeight: 700 }}>{allVariants.reduce((acc, v) => acc + (v.videos?.length || 0), 0)}</span>
                             </div>
                         </div>
                     ) : (
-                        <div style={{ display: 'flex', gap: '4px', background: COLORS.backgroundSecondary, padding: '3px', borderRadius: '8px' }}>
+                        <div style={{ display: 'flex', gap: '4px', background: COLORS.backgroundSecondary, padding: '3px', borderRadius: '10px' }}>
                             {[
                                 { id: 'images', label: 'Images' },
                                 { id: 'videos', label: 'Videos' }
@@ -1549,19 +1726,36 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                         key={t.id}
                                         onClick={() => setSubTab(t.id as SubTab)}
                                         style={{
-                                            padding: '4px 10px',
-                                            borderRadius: '6px',
+                                            padding: '5px 12px',
+                                            borderRadius: '8px',
                                             border: 'none',
                                             background: subTab === t.id ? COLORS.surface : 'transparent',
-                                            color: subTab === t.id ? COLORS.primary : COLORS.textSecondary,
-                                            fontSize: '11.5px',
+                                            color: subTab === t.id ? COLORS.primary : COLORS.textMuted,
+                                            fontSize: '12px',
                                             fontWeight: 700,
                                             cursor: 'pointer',
-                                            boxShadow: subTab === t.id ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
-                                            transition: 'all 0.15s ease'
+                                            boxShadow: subTab === t.id ? COLORS.shadowSm : 'none',
+                                            transition: 'all 0.2s'
                                         }}
                                     >
-                                        {t.label} <span style={{ opacity: 0.5, fontSize: '10px', marginLeft: '2px' }}>({count})</span>
+                                        {t.label}
+                                        {count > 0 && (
+                                            <span style={{
+                                                fontSize: '10px',
+                                                marginLeft: '6px',
+                                                background: subTab === t.id ? COLORS.primary : 'transparent',
+                                                color: subTab === t.id ? '#fff' : COLORS.textMuted,
+                                                minWidth: '18px',
+                                                height: '18px',
+                                                borderRadius: '9px',
+                                                display: 'inline-flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'center',
+                                                fontWeight: 800
+                                            }}>
+                                                {count}
+                                            </span>
+                                        )}
                                     </button>
                                 );
                             })}
@@ -1576,29 +1770,36 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     className="download-main-btn"
                     style={{
                         padding: '6px 14px',
-                        background: COLORS.primary,
-                        color: '#fff',
+                        background: COLORS.primarySoft,
+                        color: COLORS.primary,
                         borderRadius: '8px',
-                        fontSize: '12px',
-                        fontWeight: 700,
-                        border: 'none',
+                        fontSize: '12.5px',
+                        fontWeight: 600,
+                        border: `1px solid ${COLORS.primary}`,
                         cursor: (downloadingAsin === productData?.asin) ? 'wait' : 'pointer',
                         display: 'flex',
                         alignItems: 'center',
                         gap: '6px',
                         transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
-                        opacity: (downloadingAsin === productData?.asin) ? 0.85 : 1,
-                        boxShadow: '0 4px 12px rgba(79, 70, 229, 0.2)',
+                        opacity: (downloadingAsin === productData?.asin) ? 0.7 : 1,
+                    }}
+                    onMouseEnter={e => {
+                        e.currentTarget.style.background = COLORS.primary;
+                        e.currentTarget.style.color = '#FFFFFF';
+                    }}
+                    onMouseLeave={e => {
+                        e.currentTarget.style.background = COLORS.primarySoft;
+                        e.currentTarget.style.color = COLORS.primary;
                     }}
                 >
                     {downloadingAsin === productData?.asin ? (
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: 'spin 1.5s linear infinite' }}>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: 'spin 1.5s linear infinite' }}>
                             <path d="M21 12a9 9 0 1 1-6.219-8.56" />
                         </svg>
                     ) : (
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
                     )}
-                    <span style={{ whiteSpace: 'nowrap' }}>{downloadingAsin === productData?.asin ? 'Processing...' : 'Download All'}</span>
+                    Download All
                 </button>
             </div>
         );
@@ -1623,10 +1824,19 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
         const allVariants = baseVariants.map(v => {
             const cachedImages = variantImagesCache[v.asin];
-            if (cachedImages && cachedImages.length > 0) {
-                return { ...v, images: cachedImages, image: cachedImages[0] || v.image };
+            const cachedVideos = variantVideosCache[v.asin];
+
+            let updatedVariant = { ...v };
+            if (cachedImages) {
+                updatedVariant.images = cachedImages;
+                if (cachedImages.length > 0) {
+                    updatedVariant.image = cachedImages[0];
+                }
             }
-            return v;
+            if (cachedVideos) {
+                updatedVariant.videos = cachedVideos;
+            }
+            return updatedVariant;
         });
 
         if (allVariants.length === 0) return null;
@@ -1809,14 +2019,40 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', fontWeight: 600, color: COLORS.accent }}>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
-                                        <span>{imageCount} Images</span>
+                                        <span>Images</span>
+                                        <span style={{
+                                            background: isCurrent ? COLORS.primary : COLORS.backgroundSecondary,
+                                            color: isCurrent ? '#fff' : COLORS.textSecondary,
+                                            minWidth: '18px',
+                                            height: '18px',
+                                            borderRadius: '9px',
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            fontWeight: 700,
+                                            fontSize: '9px',
+                                            marginLeft: '2px'
+                                        }}>{imageCount}</span>
                                     </div>
                                     {videoCount > 0 && (
                                         <>
                                             <span style={{ color: COLORS.border }}>|</span>
                                             <div style={{ display: 'flex', alignItems: 'center', gap: '4px', color: COLORS.accent }}>
                                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
-                                                <span>{videoCount} Video{videoCount !== 1 ? 's' : ''}</span>
+                                                <span>Videos</span>
+                                                <span style={{
+                                                    background: isCurrent ? COLORS.primary : COLORS.backgroundSecondary,
+                                                    color: isCurrent ? '#fff' : COLORS.textSecondary,
+                                                    minWidth: '18px',
+                                                    height: '18px',
+                                                    borderRadius: '9px',
+                                                    display: 'inline-flex',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center',
+                                                    fontWeight: 700,
+                                                    fontSize: '9px',
+                                                    marginLeft: '2px'
+                                                }}>{videoCount}</span>
                                             </div>
                                         </>
                                     )}
@@ -1898,9 +2134,9 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         }}>
             {/* GLOBAL HEADER: Utilities Only */}
             <div style={{
-                height: '34px',
-                padding: '0 12px',
-                background: COLORS.backgroundSecondary,
+                height: '38px',
+                padding: '0 16px', // Standardized padding
+                background: COLORS.surface,
                 borderBottom: `1px solid ${COLORS.border}`,
                 display: 'flex',
                 alignItems: 'center',
@@ -1909,51 +2145,34 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 zIndex: 50
             }}>
                 {/* Left: Utility Links */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                    {/* Settings */}
-                    <a
-                        href="#"
-                        onClick={(e) => { e.preventDefault(); }}
-                        style={{ fontSize: '11.5px', fontWeight: 600, color: COLORS.textSecondary, textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '5px', transition: 'all 0.2s', cursor: 'pointer' }}
-                        onMouseEnter={(e) => e.currentTarget.style.color = COLORS.primary}
-                        onMouseLeave={(e) => e.currentTarget.style.color = COLORS.textSecondary}
-                    >
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
-                            <circle cx="12" cy="12" r="3"></circle>
-                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-                        </svg>
-                        Settings
-                    </a>
-
-                    <span style={{ color: COLORS.text, fontSize: '12px', opacity: 0.4 }}>|</span>
-
+                <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
                     {/* Contact */}
                     <a
                         href="https://www.thinksolv.com/contact"
                         target="_blank"
                         rel="noopener noreferrer"
-                        style={{ fontSize: '11.5px', fontWeight: 600, color: COLORS.textSecondary, textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '5px', transition: 'all 0.2s' }}
+                        style={{ fontSize: '12px', fontWeight: 600, color: COLORS.textSecondary, textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.2s' }}
                         onMouseEnter={(e) => e.currentTarget.style.color = COLORS.primary}
                         onMouseLeave={(e) => e.currentTarget.style.color = COLORS.textSecondary}
                     >
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" style={{ opacity: 0.8 }}>
                             <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path>
                             <polyline points="22,6 12,13 2,6"></polyline>
                         </svg>
                         Contact
                     </a>
 
-                    <span style={{ color: COLORS.text, fontSize: '12px', opacity: 0.4 }}>|</span>
+                    <div style={{ width: '1px', height: '14px', background: COLORS.border }}></div>
 
                     {/* Help Docs */}
                     <a
                         href="#"
                         onClick={(e) => { e.preventDefault(); }}
-                        style={{ fontSize: '11.5px', fontWeight: 600, color: COLORS.textSecondary, textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '5px', transition: 'all 0.2s', cursor: 'pointer' }}
+                        style={{ fontSize: '12px', fontWeight: 600, color: COLORS.textSecondary, textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.2s', cursor: 'pointer' }}
                         onMouseEnter={(e) => e.currentTarget.style.color = COLORS.primary}
                         onMouseLeave={(e) => e.currentTarget.style.color = COLORS.textSecondary}
                     >
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" style={{ opacity: 0.8 }}>
                             <circle cx="12" cy="12" r="10"></circle>
                             <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
                             <line x1="12" y1="17" x2="12.01" y2="17"></line>
@@ -1968,30 +2187,30 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     disabled={loading}
                     className="refresh-btn"
                     style={{
-                        width: '26px',
-                        height: '26px',
+                        width: '28px',
+                        height: '28px',
                         padding: 0,
                         background: 'transparent',
                         border: 'none',
-                        color: COLORS.textSecondary,
+                        color: COLORS.text,
                         cursor: loading ? 'wait' : 'pointer',
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
                         transition: 'all 0.2s',
-                        borderRadius: '50%'
+                        borderRadius: '8px'
                     }}
                     onMouseEnter={(e) => {
-                        e.currentTarget.style.background = COLORS.border;
-                        e.currentTarget.style.color = COLORS.text;
+                        e.currentTarget.style.background = COLORS.backgroundSecondary;
+                        e.currentTarget.style.color = COLORS.primary;
                     }}
                     onMouseLeave={(e) => {
                         e.currentTarget.style.background = 'transparent';
-                        e.currentTarget.style.color = COLORS.textSecondary;
+                        e.currentTarget.style.color = COLORS.text;
                     }}
                     title="Refresh Data"
                 >
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" style={{ animation: loading ? 'spin 1.5s linear infinite' : 'none' }}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: loading ? 'spin 1.5s linear infinite' : 'none' }}>
                         <path d="M23 4v6h-6M1 20v-6h6" />
                         <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
                     </svg>
@@ -2003,38 +2222,41 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             {/* SEARCH BAR (Listing Pages) */}
             {
                 !loading && isListingPage && (
-                    <div style={{ padding: '6px 12px', background: COLORS.surface, borderBottom: `1px solid ${COLORS.borderLight}`, display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <div style={{ padding: '8px 12px', background: COLORS.surface, borderBottom: `1px solid ${COLORS.borderLight}`, display: 'flex', alignItems: 'center' }}>
                         <div style={{ position: 'relative', flex: 1 }}>
                             <input
                                 type="text"
-                                placeholder="Search by name or ASIN..."
+                                placeholder="Search products by name or ASIN..."
                                 value={searchTerm}
                                 onChange={(e) => setSearchTerm(e.target.value)}
                                 onKeyDown={(e) => e.key === 'Enter' && setActiveSearchTerm(searchTerm)}
                                 style={{
                                     width: '100%',
-                                    padding: '6px 60px 6px 12px',
+                                    padding: '8px 64px 8px 12px',
                                     background: COLORS.background,
                                     border: `1px solid ${COLORS.border}`,
-                                    borderRadius: '8px',
-                                    fontSize: '12px',
+                                    borderRadius: '10px',
+                                    fontSize: '12.5px',
                                     fontWeight: 500,
                                     color: COLORS.text,
                                     outline: 'none',
-                                    fontFamily: 'inherit'
+                                    fontFamily: 'inherit',
+                                    transition: 'border-color 0.2s'
                                 }}
+                                onFocus={(e) => e.currentTarget.style.borderColor = COLORS.primary}
+                                onBlur={(e) => e.currentTarget.style.borderColor = COLORS.border}
                             />
                             {searchTerm && (
                                 <button
                                     onClick={() => { setSearchTerm(''); setActiveSearchTerm(''); }}
                                     style={{
-                                        position: 'absolute', right: '36px', top: '50%', transform: 'translateY(-50%)',
+                                        position: 'absolute', right: '38px', top: '50%', transform: 'translateY(-50%)',
                                         background: 'none', border: 'none', color: COLORS.textMuted, cursor: 'pointer', padding: '4px',
                                         display: 'flex', alignItems: 'center', justifyContent: 'center'
                                     }}
                                     title="Clear search"
                                 >
-                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                                         <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
                                     </svg>
                                 </button>
@@ -2042,35 +2264,20 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             <button
                                 onClick={() => setActiveSearchTerm(searchTerm)}
                                 style={{
-                                    position: 'absolute', right: '6px', top: '50%', transform: 'translateY(-50%)',
+                                    position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)',
                                     background: COLORS.primarySoft, border: 'none',
-                                    color: COLORS.primary, cursor: 'pointer', padding: '5px',
-                                    borderRadius: '6px',
+                                    color: COLORS.primary, cursor: 'pointer', padding: '6px',
+                                    borderRadius: '8px',
                                     display: 'flex', alignItems: 'center', justifyContent: 'center',
                                     transition: 'all 0.2s'
                                 }}
                                 title="Search"
                             >
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
                                     <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
                                 </svg>
                             </button>
                         </div>
-
-                        <button
-                            onClick={handleRefresh}
-                            style={{
-                                width: '34px', height: '34px', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                background: COLORS.backgroundSecondary, borderRadius: '8px', color: COLORS.textSecondary,
-                                border: `1px solid ${COLORS.border}`, cursor: 'pointer', transition: 'all 0.2s', flexShrink: 0
-                            }}
-                            title="Refresh Data"
-                        >
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: loading ? 'spin 1.5s linear infinite' : 'none' }}>
-                                <path d="M23 4v6h-6M1 20v-6h6" />
-                                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-                            </svg>
-                        </button>
                     </div>
                 )
             }
@@ -2118,7 +2325,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             background: COLORS.background,
                             display: 'flex',
                             flexDirection: 'column',
-                            padding: '12px 12px 60px 12px', // Extra bottom padding for floating toast
+                            padding: '12px 16px 60px 16px', // Standardized side padding (16px) to match headers
                             boxSizing: 'border-box'
                         }}>
                             {/* Product Variants List */}
@@ -2131,7 +2338,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
                             {/* Standard Media Grid (For Review Media or Product Videos) */}
                             {isProductPage && (mainTab === 'review' || subTab === 'videos') && (
-                                <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                                <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '10px' }}>
                                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px' }}>
                                         {displayedItems.map((item, index) => renderMediaItem(item, index))}
                                     </div>
@@ -2187,7 +2394,11 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                             ) : (
                                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
                                             )}
-                                            <span>Download All</span>
+                                            <span>
+                                                {selectedItems.size > 0
+                                                    ? `Download ${selectedItems.size} Selected`
+                                                    : 'Download All'}
+                                            </span>
                                         </button>
                                     </div>
 

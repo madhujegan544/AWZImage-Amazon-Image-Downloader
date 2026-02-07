@@ -13,7 +13,9 @@ import {
     scrapeAllVariantsWithMedia,
     scrapeVariantsQuick,
     getVariantMedia,
+    scrapeCurrentGalleryImages,
     scrapeCurrentGalleryVideos,
+    cleanTechnicalNoise,
     VariantItem
 } from '../utils/variantScraper';
 
@@ -52,11 +54,39 @@ interface ProductData {
 
 export default defineContentScript({
     matches: [
-        '*://*.amazon.com/*',
-        '*://*.amazon.co.uk/*',
-        '*://*.amazon.de/*',
-        '*://*.amazon.co.jp/*',
-        '*://*.amazon.in/*',
+        // North America
+        '*://*.amazon.com/*',      // United States
+        '*://*.amazon.ca/*',       // Canada
+        '*://*.amazon.com.mx/*',   // Mexico
+
+        // Europe
+        '*://*.amazon.co.uk/*',    // United Kingdom
+        '*://*.amazon.ie/*',       // Ireland
+        '*://*.amazon.de/*',       // Germany
+        '*://*.amazon.fr/*',       // France
+        '*://*.amazon.it/*',       // Italy
+        '*://*.amazon.es/*',       // Spain
+        '*://*.amazon.nl/*',       // Netherlands
+        '*://*.amazon.se/*',       // Sweden
+        '*://*.amazon.pl/*',       // Poland
+        '*://*.amazon.com.tr/*',   // Turkey
+        '*://*.amazon.com.be/*',   // Belgium
+
+        // Asia Pacific
+        '*://*.amazon.co.jp/*',    // Japan
+        '*://*.amazon.in/*',       // India
+        '*://*.amazon.cn/*',       // China
+        '*://*.amazon.sg/*',       // Singapore
+        '*://*.amazon.com.au/*',   // Australia
+
+        // Middle East & Africa
+        '*://*.amazon.ae/*',       // United Arab Emirates
+        '*://*.amazon.sa/*',       // Saudi Arabia
+        '*://*.amazon.eg/*',       // Egypt
+        '*://*.amazon.co.za/*',    // South Africa
+
+        // South America
+        '*://*.amazon.com.br/*',   // Brazil
     ],
     main() {
         console.log('AMZImage Content Script v3.0 Loaded');
@@ -484,7 +514,7 @@ export default defineContentScript({
                 for (const titleSel of titleSelectors) {
                     const titleEl = card.querySelector<HTMLElement>(titleSel);
                     if (titleEl?.textContent?.trim()) {
-                        title = titleEl.textContent.trim();
+                        title = cleanTechnicalNoise(titleEl.textContent.trim());
                         break;
                     }
                 }
@@ -581,7 +611,7 @@ export default defineContentScript({
             let title = '';
             if (onProductPage) {
                 const titleElement = document.querySelector('#productTitle, #title');
-                title = titleElement?.textContent?.trim() || '';
+                title = cleanTechnicalNoise(titleElement?.textContent?.trim() || '');
             } else {
                 const searchQuery = new URLSearchParams(window.location.search).get('k');
                 if (searchQuery) {
@@ -593,8 +623,36 @@ export default defineContentScript({
 
             let variant = '';
             if (onProductPage) {
-                const variantElement = document.querySelector('#variation_color_name .selection, #variation_size_name .selection');
-                variant = variantElement?.textContent?.trim() || '';
+                const activeAttrs: string[] = [];
+                // Comprehensive selection labels (Color, Storage, Size, etc.)
+                const selectors = [
+                    '#variation_color_name .selection',
+                    '#variation_storage_capacity .selection',
+                    '#variation_size_name .selection',
+                    '#variation_style_name .selection',
+                    '#variation_capacity .selection',
+                    '.variation-selection'
+                ];
+
+                selectors.forEach(sel => {
+                    const el = document.querySelector(sel);
+                    if (el?.textContent?.trim()) {
+                        const cleaned = cleanTechnicalNoise(el.textContent.trim());
+                        if (cleaned && !activeAttrs.includes(cleaned)) {
+                            activeAttrs.push(cleaned);
+                        }
+                    }
+                });
+
+                if (activeAttrs.length > 0) {
+                    variant = activeAttrs.join(' / ');
+                } else {
+                    // Final fallback: Look for active swatches in the DOM if labels are missing
+                    const activeSwatch = document.querySelector('.swatchInstance.selected .a-button-text, .swatchInstance.active .a-button-text, li.swatchSelect .a-button-text');
+                    if (activeSwatch) {
+                        variant = cleanTechnicalNoise(activeSwatch.textContent?.trim() || '');
+                    }
+                }
             }
 
             let description = '';
@@ -638,12 +696,21 @@ export default defineContentScript({
                     });
                 }
 
-                // Update current ASIN's selected state
+                // Update current ASIN's selected state and RE-SCRAPE current gallery images
+                // to ensure we always have the 100% correct official set from the website.
                 const activeAsinForVariant = getCurrentAsin();
-                variants = variants.map(v => ({
-                    ...v,
-                    selected: v.asin === activeAsinForVariant
-                }));
+                const currentGalleryImages = scrapeCurrentGalleryImages();
+
+                variants = variants.map(v => {
+                    const isSelected = v.asin === activeAsinForVariant;
+                    return {
+                        ...v,
+                        selected: isSelected,
+                        // If this is the active variant on the page, update its images from the live DOM
+                        // but stay focused on IMAGES as requested (don't disturb existing video logic)
+                        images: isSelected ? currentGalleryImages : v.images
+                    };
+                });
 
                 // Build variant maps and populate main gallery from selected variant
                 const selectedVariant = variants.find(v => v.selected);
@@ -669,16 +736,8 @@ export default defineContentScript({
                     }
                 });
 
-                // FALLBACK: Ensure current page videos are captured even if variant mapping failed
-                if (videos.length === 0) {
-                    const directVideos = scrapeCurrentGalleryVideos();
-                    if (directVideos.length > 0) {
-                        console.log('AMZImage: Recovered', directVideos.length, 'videos from direct scrape');
-                        directVideos.forEach(v => {
-                            if (!videos.includes(v)) videos.push(v);
-                        });
-                    }
-                }
+                // Removed fallback: Do not recover videos from direct scrape if variant mapping failed,
+                // as this causes "bleed-over" of default videos into variants that have none.
 
                 // ============================================
                 // REVIEW MEDIA EXTRACTION (Customer Content Only)

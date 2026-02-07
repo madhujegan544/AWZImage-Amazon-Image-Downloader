@@ -134,6 +134,118 @@ function safeParseJSON<T>(jsonStr: string): T | null {
     }
 }
 
+/**
+ * Removes technical noise from product/variant names like scales (1:24, 1/18, 1.24)
+ * and technical prefixes that don't add meaningful info for the user.
+ */
+export function cleanTechnicalNoise(name: string): string {
+    if (!name) return name;
+
+    // Generic placeholder words to strip if they are the ONLY name or clearly noise
+    const genericWords = ['product', 'default', 'item', 'option', 'variant', 'selection', 'none', 'n/a', 'empty'];
+    const lower = name.toLowerCase().trim();
+    if (genericWords.includes(lower)) return '';
+
+    // Use a multi-pass approach to catch nested or complex technical prefixes
+    let previous = '';
+    let cleaned = name;
+
+    for (let i = 0; i < 3; i++) { // Max 3 passes to avoid infinite loops
+        previous = cleaned;
+        cleaned = cleaned
+            // 1. Remove ratio/scale patterns like "1:24", "1/24", "1:18", "1.24"
+            .replace(/\b\d+[:/.]\d+(\s*(Scale|Ratio))?\b/gi, ' ')
+            // 2. Remove common scale identifiers if they appear alone
+            .replace(/\b\d+\s*(Scale|Ratio)\b/gi, ' ')
+            // 3. Remove leading/trailing non-word noise
+            .replace(/^[-\s:|./*+]{1,3}/, '')
+            .replace(/[-\s:|./*+]{1,3}$/, '')
+            // 4. Remove multiple spaces and trim
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        if (cleaned === previous) break;
+    }
+
+    return cleaned;
+}
+
+/**
+ * Formats a variant name by prioritizing specific attributes and using a proper separator.
+ * Detects and replaces generic names with meaningful attributes.
+ */
+export function formatVariantName(rawValues: string[], dimensionLabels: string[]): string {
+    if (!rawValues || rawValues.length === 0) return '';
+
+    // priority: color -> storage/capacity -> size -> model
+    const genericWords = ['product', 'default', 'item', 'option', 'variant', 'selection', 'none', 'n/a', 'empty', 'style', 'color', 'size'];
+
+    const attributeMap: Record<string, string> = {};
+
+    // Attempt to map values to their labels if labels are provided
+    rawValues.forEach((val, i) => {
+        const label = (dimensionLabels[i] || `attr_${i}`).toLowerCase();
+        attributeMap[label] = val.trim();
+    });
+
+    const isGenericValue = (val: string) => !val || genericWords.includes(val.toLowerCase().trim());
+
+    // Priority extraction
+    const parts: string[] = [];
+
+    // 1. Color
+    const colorKey = Object.keys(attributeMap).find(k => k.includes('color'));
+    if (colorKey && attributeMap[colorKey] && !isGenericValue(attributeMap[colorKey])) {
+        const val = cleanTechnicalNoise(attributeMap[colorKey]);
+        if (val) parts.push(val);
+    }
+
+    // 2. Storage / Capacity
+    const storageKey = Object.keys(attributeMap).find(k => k.includes('storage') || k.includes('capacity') || k.includes('memory'));
+    if (storageKey && attributeMap[storageKey] && !isGenericValue(attributeMap[storageKey])) {
+        const val = cleanTechnicalNoise(attributeMap[storageKey]);
+        if (val && !parts.includes(val)) parts.push(val);
+    }
+
+    // 3. Size
+    const sizeKey = Object.keys(attributeMap).find(k => k.includes('size') || k.includes('dimension'));
+    if (sizeKey && attributeMap[sizeKey] && !isGenericValue(attributeMap[sizeKey])) {
+        const val = cleanTechnicalNoise(attributeMap[sizeKey]);
+        if (val && !parts.includes(val)) parts.push(val);
+    }
+
+    // 4. Model / Style
+    const modelKey = Object.keys(attributeMap).find(k => k.includes('model') || k.includes('style'));
+    if (modelKey && attributeMap[modelKey] && !isGenericValue(attributeMap[modelKey])) {
+        const val = cleanTechnicalNoise(attributeMap[modelKey]);
+        if (val && !parts.includes(val)) parts.push(val);
+    }
+
+    // 5. Fallback for any other meaningful attribute that wasn't covered but isn't generic
+    Object.keys(attributeMap).forEach(k => {
+        const val = attributeMap[k];
+        if (val && !isGenericValue(val)) {
+            const cleaned = cleanTechnicalNoise(val);
+            if (cleaned && !parts.some(p => p.toLowerCase() === cleaned.toLowerCase())) {
+                parts.push(cleaned);
+            }
+        }
+    });
+
+    if (parts.length > 0) {
+        return parts.join(' / ');
+    }
+
+    // Final fallback: if everything was generic or filtered out, use the original values but clean them
+    const cleanValues = rawValues
+        .map(v => cleanTechnicalNoise(v))
+        .filter(v => v && !isGenericValue(v));
+
+    if (cleanValues.length > 0) return cleanValues.join(' / ');
+
+    return '';
+}
+
 // ============================================
 // CORE SCRAPING FUNCTIONS
 // ============================================
@@ -167,7 +279,7 @@ function getCurrentAsin(): string {
 /**
  * Scrapes official gallery images for the CURRENT variant from the DOM
  */
-function scrapeCurrentGalleryImages(): string[] {
+export function scrapeCurrentGalleryImages(): string[] {
     const images: string[] = [];
     const seenIds = new Set<string>();
 
@@ -186,7 +298,8 @@ function scrapeCurrentGalleryImages(): string[] {
     for (const script of Array.from(scripts)) {
         const content = script.textContent || '';
         if (content.includes('imageGalleryData')) {
-            const match = content.match(/imageGalleryData\s*:\s*(\[[^\]]+\])/);
+            // Improved regex to handle nested brackets and multi-line data
+            const match = content.match(/imageGalleryData\s*:\s*(\[[\s\S]*?\])(?=\s*[,;]|\s*$)/);
             if (match) {
                 try {
                     const data = JSON.parse(match[1]);
@@ -207,12 +320,12 @@ function scrapeCurrentGalleryImages(): string[] {
         const content = script.textContent || '';
         if (content.includes('ImageBlockATF') || content.includes('colorImages')) {
             // Pattern to find "initial": [...] or "ASIN": [...] blocks
-            // This prevents reading the entire script which contains all variants
+            // PRIORITY: Look for current ASIN first to ensure immediate sync on variant switch
             const patterns = [
-                /"initial"\s*:\s*(\[[\s\S]*?\])(?=\s*[,}])/i,
-                /'initial'\s*:\s*(\[[\s\S]*?\])(?=\s*[,}])/i,
                 new RegExp(`"${currentAsin}"\\s*:\\s*(\\[[\\s\\S]*?\\])(?=\\s*[,}])`),
-                new RegExp(`'${currentAsin}'\\s*:\\s*(\\[[\\s\\S]*?\\])(?=\\s*[,}])`)
+                new RegExp(`'${currentAsin}'\\s*:\\s*(\\[[\\s\\S]*?\\])(?=\\s*[,}])`),
+                /"initial"\s*:\s*(\[[\s\S]*?\])(?=\s*[,}])/i,
+                /'initial'\s*:\s*(\[[\s\S]*?\])(?=\s*[,}])/i
             ];
 
             let foundBlock = false;
@@ -286,7 +399,8 @@ export function scrapeCurrentGalleryVideos(): string[] {
     for (const script of Array.from(scripts)) {
         const content = script.textContent || '';
         if (content.includes('imageGalleryData')) {
-            const match = content.match(/imageGalleryData\s*:\s*(\[[^\]]+\])/);
+            // Improved regex to handle nested brackets and multi-line data
+            const match = content.match(/imageGalleryData\s*:\s*(\[[\s\S]*?\])(?=\s*[,;]|\s*$)/);
             if (match) {
                 try {
                     const data = JSON.parse(match[1]);
@@ -341,15 +455,36 @@ export function scrapeCurrentGalleryVideos(): string[] {
 /**
  * Extracts all variant ASINs and their basic info from the page
  */
-function extractAllVariantInfo(): Map<string, { name: string; thumbnail: string; available: boolean }> {
+export function extractAllVariantInfo(): Map<string, { name: string; thumbnail: string; available: boolean }> {
     const variants = new Map<string, { name: string; thumbnail: string; available: boolean }>();
 
     // Strategy 1: dimensionValuesDisplayData (Most reliable for all variants)
     const scripts = document.querySelectorAll('script:not([src])');
     const dimensionValues: Record<string, string[]> = {};
+    let dimensionLabels: string[] = [];
 
     for (const script of Array.from(scripts)) {
         const content = script.textContent || '';
+
+        // 1a. Extract Labels (Priority)
+        if (content.includes('variationDisplayLabels') || content.includes('dimensions')) {
+            const labelsMatch = content.match(/variationDisplayLabels\s*:\s*(\[.*?\])/) ||
+                content.match(/dimensions\s*:\s*(\[.*?\])/);
+            if (labelsMatch) {
+                try {
+                    // Manual parse if JSON.parse fails due to single quotes
+                    const raw = labelsMatch[1].replace(/'/g, '"');
+                    const parsed = JSON.parse(raw);
+                    if (Array.isArray(parsed)) dimensionLabels = parsed;
+                } catch {
+                    // Regex fallback for labels
+                    const labels = labelsMatch[1].match(/"([^"]+)"|'([^']+)'/g);
+                    if (labels) dimensionLabels = labels.map(l => l.replace(/["']/g, ''));
+                }
+            }
+        }
+
+        // 1b. Extract Values
         if (content.includes('dimensionValuesDisplayData')) {
             const asinPattern = /"([A-Z0-9]{10})"\s*:\s*\[(.*?)\]/g;
             let m;
@@ -399,11 +534,18 @@ function extractAllVariantInfo(): Map<string, { name: string; thumbnail: string;
                 el.classList.contains('unavailable');
 
             // Get name from dimension values or color mapping
-            let name = dimensionValues[asin]?.join(' + ') || '';
-            if (!name) {
-                const colorName = Object.keys(colorToAsin).find(k => colorToAsin[k] === asin);
-                if (colorName) name = colorName;
+            let name = '';
+            const values = dimensionValues[asin];
+
+            if (values && values.length > 0) {
+                name = formatVariantName(values, dimensionLabels);
             }
+
+            if (!name) {
+                const colorValue = Object.keys(colorToAsin).find(k => colorToAsin[k] === asin);
+                if (colorValue) name = formatVariantName([colorValue], ['color']);
+            }
+
             if (!name) name = `Variant ${asin}`;
 
             variants.set(asin, {
@@ -417,8 +559,9 @@ function extractAllVariantInfo(): Map<string, { name: string; thumbnail: string;
     // Add variants from dimensionValues that weren't in DOM
     Object.entries(dimensionValues).forEach(([asin, values]) => {
         if (!variants.has(asin)) {
+            const name = formatVariantName(values, dimensionLabels) || `Variant ${asin}`;
             variants.set(asin, {
-                name: values.join(' + ') || `Variant ${asin}`,
+                name,
                 thumbnail: '',
                 available: true
             });
@@ -445,7 +588,7 @@ async function fetchVariantMedia(asin: string): Promise<VariantMediaMap> {
         // ========== EXTRACT IMAGES ==========
 
         // Strategy A: imageGalleryData (Best source)
-        const galleryMatch = html.match(/imageGalleryData\s*:\s*(\[[^\]]+\])/);
+        const galleryMatch = html.match(/imageGalleryData\s*:\s*(\[[\s\S]*?\])(?=\s*[,;]|\s*$)/);
         if (galleryMatch) {
             try {
                 const data = JSON.parse(galleryMatch[1]);
@@ -462,34 +605,11 @@ async function fetchVariantMedia(asin: string): Promise<VariantMediaMap> {
             } catch { }
         }
 
-        // Strategy B: ImageBlockATF hiRes
-        if (result.images.length === 0) {
-            const scriptMatch = html.match(/<script[^>]*>[\s\S]*?ImageBlockATF[\s\S]*?<\/script>/gi);
-            if (scriptMatch) {
-                scriptMatch.forEach(block => {
-                    const hiResMatches = block.match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/g);
-                    if (hiResMatches) {
-                        hiResMatches.forEach(m => {
-                            const urlMatch = m.match(/"(https:\/\/[^"]+)"/);
-                            if (urlMatch) {
-                                const url = toHighResImage(urlMatch[1]);
-                                const id = getImageCoreId(url);
-                                if (isValidProductImage(url) && !seenImageIds.has(id)) {
-                                    seenImageIds.add(id);
-                                    result.images.push(url);
-                                }
-                            }
-                        });
-                    }
-                });
-            }
-        }
-
-        // Strategy C: colorImages data
-        if (result.images.length === 0) {
-            const colorMatch = html.match(/'colorImages'\s*:\s*(\{[\s\S]*?\})\s*,/);
-            if (colorMatch) {
-                const hiResMatches = colorMatch[1].match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/g);
+        // Strategy B: ImageBlockATF hiRes (Accumulative)
+        const scriptMatch = html.match(/<script[^>]*>[\s\S]*?ImageBlockATF[\s\S]*?<\/script>/gi);
+        if (scriptMatch) {
+            scriptMatch.forEach(block => {
+                const hiResMatches = block.match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/g);
                 if (hiResMatches) {
                     hiResMatches.forEach(m => {
                         const urlMatch = m.match(/"(https:\/\/[^"]+)"/);
@@ -503,26 +623,43 @@ async function fetchVariantMedia(asin: string): Promise<VariantMediaMap> {
                         }
                     });
                 }
+            });
+        }
+
+        // Strategy C: colorImages data (Accumulative)
+        const colorMatch = html.match(/'colorImages'\s*:\s*(\{[\s\S]*?\})\s*,/);
+        if (colorMatch) {
+            const hiResMatches = colorMatch[1].match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/g);
+            if (hiResMatches) {
+                hiResMatches.forEach(m => {
+                    const urlMatch = m.match(/"(https:\/\/[^"]+)"/);
+                    if (urlMatch) {
+                        const url = toHighResImage(urlMatch[1]);
+                        const id = getImageCoreId(url);
+                        if (isValidProductImage(url) && !seenImageIds.has(id)) {
+                            seenImageIds.add(id);
+                            result.images.push(url);
+                        }
+                    }
+                });
             }
         }
 
-        // Strategy D: data-a-dynamic-image
-        if (result.images.length === 0) {
-            const dynamicMatch = html.match(/data-a-dynamic-image\s*=\s*"([^"]+)"/);
-            if (dynamicMatch) {
-                try {
-                    const decoded = dynamicMatch[1].replace(/&quot;/g, '"').replace(/&#34;/g, '"');
-                    const parsed = JSON.parse(decoded);
-                    Object.keys(parsed).forEach(url => {
-                        const highRes = toHighResImage(url);
-                        const id = getImageCoreId(highRes);
-                        if (isValidProductImage(highRes) && !seenImageIds.has(id)) {
-                            seenImageIds.add(id);
-                            result.images.push(highRes);
-                        }
-                    });
-                } catch { }
-            }
+        // Strategy D: data-a-dynamic-image (Accumulative)
+        const dynamicMatch = html.match(/data-a-dynamic-image\s*=\s*"([^"]+)"/);
+        if (dynamicMatch) {
+            try {
+                const decoded = dynamicMatch[1].replace(/&quot;/g, '"').replace(/&#34;/g, '"');
+                const parsed = JSON.parse(decoded);
+                Object.keys(parsed).forEach(url => {
+                    const highRes = toHighResImage(url);
+                    const id = getImageCoreId(highRes);
+                    if (isValidProductImage(highRes) && !seenImageIds.has(id)) {
+                        seenImageIds.add(id);
+                        result.images.push(highRes);
+                    }
+                });
+            } catch { }
         }
 
         // ========== EXTRACT VIDEOS ==========
@@ -671,9 +808,13 @@ export function scrapeVariantsQuick(): VariantItem[] {
 
     if (variantInfo.size === 0 && currentAsin) {
         const mainImg = document.querySelector('#landingImage') as HTMLImageElement;
+        const titleEl = document.querySelector('#productTitle');
+        let name = cleanTechnicalNoise(titleEl?.textContent?.trim() || 'Product');
+        if (!name || name.toLowerCase() === 'product') name = 'Default Option';
+
         return [{
             asin: currentAsin,
-            name: 'Product',
+            name,
             image: mainImg?.src ? toHighResImage(mainImg.src) : '',
             images: [],
             videos: [],
