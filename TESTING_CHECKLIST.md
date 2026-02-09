@@ -121,6 +121,7 @@
 
 **Checklist:**
 - [ ] Page loads successfully
+
 - [ ] Console shows: `AMZImage Content Script v3.0 Loaded`
 - [ ] Extension works on Indian marketplace
 - [ ] Rupee pricing displays (if shown)
