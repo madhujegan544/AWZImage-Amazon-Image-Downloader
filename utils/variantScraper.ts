@@ -34,14 +34,54 @@ interface VariantMediaMap {
 // ============================================
 
 /**
- * Extracts the core Amazon image ID for deduplication
+ * Extracts the core Amazon image ID for deduplication.
+ * Normalizes URL-encoded characters (e.g., %2B -> +) for consistent matching.
  */
 function getImageCoreId(url: string): string {
-    const match = url.match(/\/I\/([A-Za-z0-9\-+%]+)/);
+    let decoded = url;
+    try { decoded = decodeURIComponent(url); } catch { /* ignore */ }
+    const match = decoded.match(/\/I\/([A-Za-z0-9\-+%]+)/);
     if (match) return match[1].split('.')[0];
-    const parts = url.split('/');
-    const filename = parts[parts.length - 1] || url;
+    const parts = decoded.split('/');
+    const filename = parts[parts.length - 1] || decoded;
     return filename.split('.')[0];
+}
+
+/**
+ * Extracts a balanced JSON array from text, starting from a key.
+ * Correctly handles nested brackets unlike regex-based extraction.
+ * @param text - The text to search in
+ * @param key - The key before the array (e.g., 'imageGalleryData', 'initial')
+ * @returns The extracted JSON array string, or null if not found
+ */
+function extractBalancedArray(text: string, key: string): string | null {
+    // Find the key, then the opening bracket
+    const keyPattern = new RegExp(key + '\\s*:\\s*\\[');
+    const keyMatch = keyPattern.exec(text);
+    if (!keyMatch) return null;
+
+    const startIdx = keyMatch.index + keyMatch[0].length - 1; // Position of opening [
+    let depth = 0;
+
+    for (let i = startIdx; i < text.length && i < startIdx + 500000; i++) {
+        const ch = text[i];
+        if (ch === '[') depth++;
+        else if (ch === ']') {
+            depth--;
+            if (depth === 0) {
+                return text.substring(startIdx, i + 1);
+            }
+        }
+        // Skip over string content to avoid false bracket matches
+        if (ch === '"') {
+            i++;
+            while (i < text.length && text[i] !== '"') {
+                if (text[i] === '\\') i++; // Skip escaped chars
+                i++;
+            }
+        }
+    }
+    return null;
 }
 
 /**
@@ -294,15 +334,15 @@ export function scrapeCurrentGalleryImages(): string[] {
     };
 
     // Strategy 1: imageGalleryData (Most complete - contains ALL gallery images)
+    // Uses bracket-aware extraction to handle nested arrays
     const scripts = document.querySelectorAll('script:not([src])');
     for (const script of Array.from(scripts)) {
         const content = script.textContent || '';
         if (content.includes('imageGalleryData')) {
-            // Improved regex to handle nested brackets and multi-line data
-            const match = content.match(/imageGalleryData\s*:\s*(\[[\s\S]*?\])(?=\s*[,;]|\s*$)/);
-            if (match) {
+            const arrayStr = extractBalancedArray(content, 'imageGalleryData');
+            if (arrayStr) {
                 try {
-                    const data = JSON.parse(match[1]);
+                    const data = JSON.parse(arrayStr);
                     data.forEach((item: any) => {
                         if (item.mediaType === 'image' && item.url) {
                             addImage(item.url);
@@ -313,65 +353,74 @@ export function scrapeCurrentGalleryImages(): string[] {
         }
     }
 
-    // Strategy 2: ImageBlockATF & colorImages (Scoped to Current ASIN)
-    // We strictly look for "initial" or matching ASIN keys to avoid grabbing ALL variant images
-    const currentAsin = getCurrentAsin();
-    for (const script of Array.from(scripts)) {
-        const content = script.textContent || '';
-        if (content.includes('ImageBlockATF') || content.includes('colorImages')) {
-            // Pattern to find "initial": [...] or "ASIN": [...] blocks
-            // PRIORITY: Look for current ASIN first to ensure immediate sync on variant switch
-            const patterns = [
-                new RegExp(`"${currentAsin}"\\s*:\\s*(\\[[\\s\\S]*?\\])(?=\\s*[,}])`),
-                new RegExp(`'${currentAsin}'\\s*:\\s*(\\[[\\s\\S]*?\\])(?=\\s*[,}])`),
-                /"initial"\s*:\s*(\[[\s\S]*?\])(?=\s*[,}])/i,
-                /'initial'\s*:\s*(\[[\s\S]*?\])(?=\s*[,}])/i
-            ];
-
-            let foundBlock = false;
-            for (const pattern of patterns) {
-                const match = content.match(pattern);
-                if (match) {
-                    const blockContent = match[1];
-                    // Now safely extract hiRes from ONLY this block
-                    const hiResMatches = blockContent.match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/g);
-                    if (hiResMatches) {
-                        hiResMatches.forEach(m => {
-                            const urlMatch = m.match(/"(https:\/\/[^"]+)"/);
-                            if (urlMatch) {
-                                addImage(urlMatch[1]);
-                                foundBlock = true;
+    // Strategy 2: colorImages (Scoped to Current ASIN)
+    // Only if Strategy 1 found nothing
+    if (images.length === 0) {
+        const currentAsin = getCurrentAsin();
+        for (const script of Array.from(scripts)) {
+            const content = script.textContent || '';
+            if (content.includes('colorImages') || content.includes('ImageBlockATF')) {
+                // Try ASIN-keyed first, then 'initial'
+                const keys = [`"${currentAsin}"`, `'${currentAsin}'`, '"initial"', "'initial'"];
+                for (const key of keys) {
+                    const arrayStr = extractBalancedArray(content, key);
+                    if (arrayStr) {
+                        try {
+                            const data = JSON.parse(arrayStr);
+                            data.forEach((item: any) => {
+                                const url = item.hiRes || item.large || item.mainUrl;
+                                if (url && typeof url === 'string') addImage(url);
+                            });
+                        } catch {
+                            // Fallback: regex extraction from the block
+                            const hiResMatches = arrayStr.match(/["']hiRes["']\s*:\s*["'](https:\/\/[^"']+)["']/g);
+                            if (hiResMatches) {
+                                hiResMatches.forEach(m => {
+                                    const urlMatch = m.match(/["'](https:\/\/[^"']+)["']/);
+                                    if (urlMatch) addImage(urlMatch[1]);
+                                });
                             }
-                        });
+                        }
+                        if (images.length > 0) break;
                     }
-                    if (foundBlock) break; // Found the correct block, stop searching this script
                 }
+                if (images.length > 0) break;
             }
         }
     }
 
-    // Strategy 3: Alt Images thumbnails (Visible in gallery)
-    document.querySelectorAll('#altImages ul li.item img').forEach(img => {
-        addImage((img as HTMLImageElement).src);
-    });
+    // Strategy 3: DOM fallback (Only if JSON strategies found nothing)
+    if (images.length === 0) {
+        // Alt Images thumbnails (skip video thumbnails)
+        document.querySelectorAll('#altImages ul li.item img').forEach(el => {
+            const img = el as HTMLImageElement;
+            const parentLi = img.closest('li');
+            if (parentLi) {
+                // Skip video thumbnails
+                const isVideoThumb = parentLi.classList.contains('videoThumbnail') ||
+                    parentLi.querySelector('.vse-video-thumbnail-flyover, input[type="hidden"]') !== null;
+                if (isVideoThumb) return;
+            }
+            addImage(img.src);
+        });
 
-    // Strategy 4: Main landing image
-    const mainImg = document.querySelector('#landingImage, #imgTagWrapperId img') as HTMLImageElement;
-    if (mainImg?.src) addImage(mainImg.src);
+        // Main landing image
+        const mainImg = document.querySelector('#landingImage, #imgTagWrapperId img') as HTMLImageElement;
+        if (mainImg?.src) addImage(mainImg.src);
 
-    // Strategy 5: data-a-dynamic-image attribute (High-res candidates)
-    const dynamicContainers = document.querySelectorAll(
-        '#main-image-container, #landingImage, #imgTagWrapperId, .imgTagWrapper, #imageBlock'
-    );
-    dynamicContainers.forEach(container => {
-        const data = container.getAttribute('data-a-dynamic-image');
-        if (data) {
-            try {
-                const parsed = JSON.parse(data);
-                Object.keys(parsed).forEach(url => addImage(url));
-            } catch { }
-        }
-    });
+        // data-a-dynamic-image (targeted containers)
+        document.querySelectorAll(
+            '#main-image-container, #landingImage, #imgTagWrapperId, .imgTagWrapper, #imageBlock'
+        ).forEach(container => {
+            const data = container.getAttribute('data-a-dynamic-image');
+            if (data) {
+                try {
+                    const parsed = JSON.parse(data);
+                    Object.keys(parsed).forEach(url => addImage(url));
+                } catch { }
+            }
+        });
+    }
 
     return images;
 }
@@ -394,16 +443,17 @@ export function scrapeCurrentGalleryVideos(): string[] {
     };
 
     const scripts = document.querySelectorAll('script:not([src])');
+    let foundGalleryData = false;
 
-    // Strategy 1: imageGalleryData (Contains video entries)
+    // Strategy 1: imageGalleryData (Authoritative - Contains video entries)
     for (const script of Array.from(scripts)) {
         const content = script.textContent || '';
         if (content.includes('imageGalleryData')) {
-            // Improved regex to handle nested brackets and multi-line data
-            const match = content.match(/imageGalleryData\s*:\s*(\[[\s\S]*?\])(?=\s*[,;]|\s*$)/);
-            if (match) {
+            const arrayStr = extractBalancedArray(content, 'imageGalleryData');
+            if (arrayStr) {
+                foundGalleryData = true;
                 try {
-                    const data = JSON.parse(match[1]);
+                    const data = JSON.parse(arrayStr);
                     data.forEach((item: any) => {
                         if (item.mediaType === 'video' && item.url) {
                             addVideo(item.url);
@@ -414,36 +464,39 @@ export function scrapeCurrentGalleryVideos(): string[] {
         }
     }
 
-    // Strategy 2: Official gallery script blocks (ImageBlockATF, colorImages)
-    for (const script of Array.from(scripts)) {
-        const content = script.textContent || '';
-        if (content.includes('ImageBlockATF') || content.includes('colorImages') || content.includes('altImages')) {
-            const videoMatches = content.match(/https?:\/\/[^"'\s]*?\.(mp4|m3u8|webm)[^"'\s]*/gi);
-            if (videoMatches) {
-                videoMatches.forEach(url => addVideo(url));
+    // Only fall back to other strategies if imageGalleryData was NOT found
+    if (!foundGalleryData) {
+        // Strategy 2: Official gallery script blocks (ImageBlockATF, colorImages)
+        for (const script of Array.from(scripts)) {
+            const content = script.textContent || '';
+            if (content.includes('ImageBlockATF') || content.includes('colorImages') || content.includes('altImages')) {
+                const videoMatches = content.match(/https?:\/\/[^"'\s]*?\.(mp4|m3u8|webm)[^"'\s]*/gi);
+                if (videoMatches) {
+                    videoMatches.forEach(url => addVideo(url));
+                }
             }
         }
-    }
 
-    // Strategy 3: VSE Video Data (Amazon's video player)
-    for (const script of Array.from(scripts)) {
-        const content = script.textContent || '';
-        const vsePatterns = [
-            /"vseVideoData"\s*:\s*(\[[^\]]*\])/,
-            /"videoList"\s*:\s*(\[[^\]]*\])/
-        ];
+        // Strategy 3: VSE Video Data (Amazon's video player)
+        for (const script of Array.from(scripts)) {
+            const content = script.textContent || '';
+            const vsePatterns = [
+                /"vseVideoData"\s*:\s*(\[[^\]]*\])/,
+                /"videoList"\s*:\s*(\[[^\]]*\])/
+            ];
 
-        for (const pattern of vsePatterns) {
-            const match = content.match(pattern);
-            if (match) {
-                const block = match[1].toLowerCase();
-                // Skip if this is brand/customer content
-                if (block.includes('brandstory') || block.includes('customer') || block.includes('review')) {
-                    continue;
-                }
-                const urls = match[1].match(/https?:\/\/[^"'\s,\]]+\.(mp4|m3u8|webm)[^"'\s,\]]*/gi);
-                if (urls) {
-                    urls.forEach(url => addVideo(url));
+            for (const pattern of vsePatterns) {
+                const match = content.match(pattern);
+                if (match) {
+                    const block = match[1].toLowerCase();
+                    // Skip if this is brand/customer content
+                    if (block.includes('brandstory') || block.includes('customer') || block.includes('review')) {
+                        continue;
+                    }
+                    const urls = match[1].match(/https?:\/\/[^"'\s,\]]+\.(mp4|m3u8|webm)[^"'\s,\]]*/gi);
+                    if (urls) {
+                        urls.forEach(url => addVideo(url));
+                    }
                 }
             }
         }
@@ -586,12 +639,15 @@ async function fetchVariantMedia(asin: string): Promise<VariantMediaMap> {
         const html = await response.text();
 
         // ========== EXTRACT IMAGES ==========
+        // STRICT PRIORITY CASCADE: Use the FIRST strategy that yields results.
+        // This prevents cross-source duplicates.
 
-        // Strategy A: imageGalleryData (Best source)
-        const galleryMatch = html.match(/imageGalleryData\s*:\s*(\[[\s\S]*?\])(?=\s*[,;]|\s*$)/);
-        if (galleryMatch) {
+        // Strategy A: imageGalleryData (Most authoritative)
+        // Uses bracket-aware extraction to handle nested arrays like dimensions: [100, 200]
+        const galleryArrayStr = extractBalancedArray(html, 'imageGalleryData');
+        if (galleryArrayStr) {
             try {
-                const data = JSON.parse(galleryMatch[1]);
+                const data = JSON.parse(galleryArrayStr);
                 data.forEach((item: any) => {
                     if (item.mediaType === 'image' && item.url) {
                         const highRes = toHighResImage(item.url);
@@ -605,36 +661,66 @@ async function fetchVariantMedia(asin: string): Promise<VariantMediaMap> {
             } catch { }
         }
 
-        // Strategy B: ImageBlockATF hiRes (Accumulative)
-        const scriptMatch = html.match(/<script[^>]*>[\s\S]*?ImageBlockATF[\s\S]*?<\/script>/gi);
-        if (scriptMatch) {
-            scriptMatch.forEach(block => {
-                const hiResMatches = block.match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/g);
-                if (hiResMatches) {
-                    hiResMatches.forEach(m => {
-                        const urlMatch = m.match(/"(https:\/\/[^"]+)"/);
-                        if (urlMatch) {
-                            const url = toHighResImage(urlMatch[1]);
-                            const id = getImageCoreId(url);
-                            if (isValidProductImage(url) && !seenImageIds.has(id)) {
-                                seenImageIds.add(id);
-                                result.images.push(url);
+        // Strategy B: colorImages "initial" or ASIN-keyed (Only if A found nothing)
+        if (result.images.length === 0) {
+            const keys = [`"${asin}"`, `'${asin}'`, '"initial"', "'initial'"];
+            for (const key of keys) {
+                const arrayStr = extractBalancedArray(html, key);
+                if (arrayStr) {
+                    try {
+                        const data = JSON.parse(arrayStr);
+                        data.forEach((item: any) => {
+                            const url = item.hiRes || item.large || item.mainUrl;
+                            if (url && typeof url === 'string') {
+                                const highRes = toHighResImage(url);
+                                const id = getImageCoreId(highRes);
+                                if (isValidProductImage(highRes) && !seenImageIds.has(id)) {
+                                    seenImageIds.add(id);
+                                    result.images.push(highRes);
+                                }
                             }
+                        });
+                    } catch {
+                        // Fallback: regex extraction from the balanced block
+                        const hiResMatches = arrayStr.match(/["']hiRes["']\s*:\s*["'](https:\/\/[^"']+)["']/g);
+                        if (hiResMatches) {
+                            hiResMatches.forEach(m => {
+                                const urlMatch = m.match(/["'](https:\/\/[^"']+)["']/);
+                                if (urlMatch) {
+                                    const url = toHighResImage(urlMatch[1]);
+                                    const id = getImageCoreId(url);
+                                    if (isValidProductImage(url) && !seenImageIds.has(id)) {
+                                        seenImageIds.add(id);
+                                        result.images.push(url);
+                                    }
+                                }
+                            });
                         }
-                    });
+                    }
+                    if (result.images.length > 0) break; // Found data, stop
                 }
-            });
+            }
         }
 
-        // Strategy C: colorImages data (Accumulative)
-        const colorMatch = html.match(/'colorImages'\s*:\s*(\{[\s\S]*?\})\s*,/);
-        if (colorMatch) {
-            const hiResMatches = colorMatch[1].match(/"hiRes"\s*:\s*"(https:\/\/[^"]+)"/g);
-            if (hiResMatches) {
-                hiResMatches.forEach(m => {
-                    const urlMatch = m.match(/"(https:\/\/[^"]+)"/);
-                    if (urlMatch) {
-                        const url = toHighResImage(urlMatch[1]);
+        // Strategy C: DOM Parser (Only if JSON strategies found nothing)
+        if (result.images.length === 0) {
+            try {
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, 'text/html');
+
+                // Alt Images thumbnails (skip video thumbnails)
+                doc.querySelectorAll('#altImages ul li img, #altImages .a-list-item img').forEach(el => {
+                    const img = el as HTMLImageElement;
+                    const parentLi = img.closest('li');
+                    if (parentLi) {
+                        // Skip video thumbnails
+                        const isVideoThumb = parentLi.classList.contains('videoThumbnail') ||
+                            parentLi.querySelector('.vse-video-thumbnail-flyover, input[type="hidden"]') !== null;
+                        if (isVideoThumb) return;
+                    }
+                    const src = img.getAttribute('src') || img.getAttribute('data-src');
+                    if (src) {
+                        const url = toHighResImage(src);
                         const id = getImageCoreId(url);
                         if (isValidProductImage(url) && !seenImageIds.has(id)) {
                             seenImageIds.add(id);
@@ -642,32 +728,34 @@ async function fetchVariantMedia(asin: string): Promise<VariantMediaMap> {
                         }
                     }
                 });
-            }
-        }
 
-        // Strategy D: data-a-dynamic-image (Accumulative)
-        const dynamicMatch = html.match(/data-a-dynamic-image\s*=\s*"([^"]+)"/);
-        if (dynamicMatch) {
-            try {
-                const decoded = dynamicMatch[1].replace(/&quot;/g, '"').replace(/&#34;/g, '"');
-                const parsed = JSON.parse(decoded);
-                Object.keys(parsed).forEach(url => {
-                    const highRes = toHighResImage(url);
-                    const id = getImageCoreId(highRes);
-                    if (isValidProductImage(highRes) && !seenImageIds.has(id)) {
-                        seenImageIds.add(id);
-                        result.images.push(highRes);
+                // Main Landing Image
+                if (result.images.length === 0) {
+                    const landing = doc.querySelector('#landingImage, #imgTagWrapperId img');
+                    if (landing) {
+                        const src = landing.getAttribute('src') || landing.getAttribute('data-src');
+                        if (src) {
+                            const url = toHighResImage(src);
+                            const id = getImageCoreId(url);
+                            if (isValidProductImage(url) && !seenImageIds.has(id)) {
+                                seenImageIds.add(id);
+                                result.images.push(url);
+                            }
+                        }
                     }
-                });
+                }
             } catch { }
         }
 
         // ========== EXTRACT VIDEOS ==========
+        // STRICT PRIORITY CASCADE: If imageGalleryData exists, it is the SOLE authority
+        // for what's in the official gallery (both images AND videos). 
+        // Only fall back to other strategies if imageGalleryData was absent.
 
-        // Strategy A: imageGalleryData videos
-        if (galleryMatch) {
+        // Strategy A: imageGalleryData videos (Authoritative)
+        if (galleryArrayStr) {
             try {
-                const data = JSON.parse(galleryMatch[1]);
+                const data = JSON.parse(galleryArrayStr);
                 data.forEach((item: any) => {
                     if (item.mediaType === 'video' && item.url) {
                         const url = item.url.replace(/\\u002F/g, '/').replace(/\\/g, '');
@@ -679,49 +767,52 @@ async function fetchVariantMedia(asin: string): Promise<VariantMediaMap> {
                     }
                 });
             } catch { }
-        }
+            // DO NOT fall through — galleryData is authoritative, even if 0 videos found
+        } else {
+            // Only use fallback strategies when imageGalleryData is absent
 
-        // Strategy B: Gallery script video URLs
-        const galleryScriptMatch = html.match(/<script[^>]*>[\s\S]*?(?:ImageBlockATF|altImages|colorImages)[\s\S]*?<\/script>/gi);
-        if (galleryScriptMatch) {
-            galleryScriptMatch.forEach(block => {
-                const videoUrls = block.match(/https?:\/\/[^"'\s]*?\.(mp4|m3u8|webm)[^"'\s]*/gi);
-                if (videoUrls) {
-                    videoUrls.forEach(url => {
-                        const cleanUrl = url.replace(/\\u002F/g, '/').replace(/\\/g, '').replace(/"/g, '');
-                        const id = getVideoCoreId(cleanUrl);
-                        if (isOfficialProductVideo(cleanUrl) && !seenVideoIds.has(id)) {
-                            seenVideoIds.add(id);
-                            result.videos.push(cleanUrl);
-                        }
-                    });
-                }
-            });
-        }
+            // Strategy B: Gallery script video URLs
+            const galleryScriptMatch = html.match(/<script[^>]*>[\s\S]*?(?:ImageBlockATF|altImages|colorImages)[\s\S]*?<\/script>/gi);
+            if (galleryScriptMatch) {
+                galleryScriptMatch.forEach(block => {
+                    const videoUrls = block.match(/https?:\/\/[^"'\s]*?\.(mp4|m3u8|webm)[^"'\s]*/gi);
+                    if (videoUrls) {
+                        videoUrls.forEach(url => {
+                            const cleanUrl = url.replace(/\\u002F/g, '/').replace(/\\/g, '').replace(/"/g, '');
+                            const id = getVideoCoreId(cleanUrl);
+                            if (isOfficialProductVideo(cleanUrl) && !seenVideoIds.has(id)) {
+                                seenVideoIds.add(id);
+                                result.videos.push(cleanUrl);
+                            }
+                        });
+                    }
+                });
+            }
 
-        // Strategy C: VSE Video Data
-        const vsePatterns = [
-            /"vseVideoData"\s*:\s*(\[[^\]]*\])/,
-            /"videoList"\s*:\s*(\[[^\]]*\])/
-        ];
+            // Strategy C: VSE Video Data
+            const vsePatterns = [
+                /"vseVideoData"\s*:\s*(\[[^\]]*\])/,
+                /"videoList"\s*:\s*(\[[^\]]*\])/
+            ];
 
-        for (const pattern of vsePatterns) {
-            const match = html.match(pattern);
-            if (match) {
-                const block = match[1].toLowerCase();
-                if (block.includes('brandstory') || block.includes('customer') || block.includes('review')) {
-                    continue;
-                }
-                const urls = match[1].match(/https?:\/\/[^"'\s,\]]+\.(mp4|m3u8|webm)[^"'\s,\]]*/gi);
-                if (urls) {
-                    urls.forEach(url => {
-                        const cleanUrl = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
-                        const id = getVideoCoreId(cleanUrl);
-                        if (isOfficialProductVideo(cleanUrl) && !seenVideoIds.has(id)) {
-                            seenVideoIds.add(id);
-                            result.videos.push(cleanUrl);
-                        }
-                    });
+            for (const pattern of vsePatterns) {
+                const match = html.match(pattern);
+                if (match) {
+                    const block = match[1].toLowerCase();
+                    if (block.includes('brandstory') || block.includes('customer') || block.includes('review')) {
+                        continue;
+                    }
+                    const urls = match[1].match(/https?:\/\/[^"'\s,\]]+\.(mp4|m3u8|webm)[^"'\s,\]]*/gi);
+                    if (urls) {
+                        urls.forEach(url => {
+                            const cleanUrl = url.replace(/\\u002F/g, '/').replace(/\\/g, '');
+                            const id = getVideoCoreId(cleanUrl);
+                            if (isOfficialProductVideo(cleanUrl) && !seenVideoIds.has(id)) {
+                                seenVideoIds.add(id);
+                                result.videos.push(cleanUrl);
+                            }
+                        });
+                    }
                 }
             }
         }

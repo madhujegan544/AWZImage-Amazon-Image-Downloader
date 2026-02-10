@@ -1245,7 +1245,9 @@ export default defineContentScript({
 
             previewState.overlay.innerHTML = `
                 <div id="amz-overlay-bg" style="position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.92); z-index:2147483647; display:flex; align-items:center; justify-content:center; flex-direction:column; font-family: Inter, -apple-system, system-ui, sans-serif; backdrop-filter: blur(8px);">
-                    <button id="amz-preview-close" style="position:absolute; top:20px; right:20px; border:none; background:rgba(255,255,255,0.1); width:44px; height:44px; border-radius:50%; color:white; cursor:pointer; font-size:24px; display:flex; align-items:center; justify-content:center; transition:background 0.2s; z-index:10;">&times;</button>
+                    <button id="amz-preview-close" style="position:absolute; top:20px; right:20px; border:none; background:rgba(255,255,255,0.1); width:44px; height:44px; border-radius:50%; color:white; cursor:pointer; display:flex; align-items:center; justify-content:center; transition:background 0.2s; z-index:10;">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                    </button>
                     
                     ${previewState.urls.length > 1 ? `
                         <button id="amz-preview-prev" style="position:absolute; left:20px; top:50%; transform:translateY(-50%); border:none; background:rgba(255,255,255,0.08); width:56px; height:56px; border-radius:50%; color:white; cursor:pointer; font-size:28px; transition:all 0.2s; display:flex; align-items:center; justify-content:center; z-index:10;">&#10094;</button>
@@ -1495,6 +1497,15 @@ export default defineContentScript({
                 loadAllVariantMedia().then(() => {
                     sendResponse({ status: 'complete' });
                     notifyContentChange('variants_loaded');
+                });
+                return true;
+            }
+
+            if (message.type === 'FETCH_VARIANT_GALLERY') {
+                const asin = message.asin;
+                // Use getVariantMedia which handles both current page (DOM) and remote fetch
+                getVariantMedia(asin).then(media => {
+                    sendResponse({ images: media.images, videos: media.videos });
                 });
                 return true;
             }

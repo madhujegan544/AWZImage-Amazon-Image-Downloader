@@ -753,6 +753,92 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     }, [productData]);
 
 
+    // Track hydrated ASINs to prevent infinite re-fetching
+    const hydratedAsinsRef = useRef<Set<string>>(new Set());
+
+    // Background Gallery Hydration: Silently fetch full data for variants with incomplete galleries
+    useEffect(() => {
+        if (!productData?.variants) return;
+
+        // Reset hydration tracking if product changes
+        if (productData.asin && !hydratedAsinsRef.current.has('INIT_' + productData.asin)) {
+            hydratedAsinsRef.current = new Set();
+            hydratedAsinsRef.current.add('INIT_' + productData.asin);
+        }
+
+        const hydrateIncompleteVariants = async () => {
+            // HYDRATION STRATEGY: Fetch ALL variants to guarantee 100% complete data.
+            // We only skip:
+            // 1. Variants we have already hydrated in this session
+            // 2. The currently selected variant, BUT ONLY IF it already has a "good" amount of data.
+            const incompleteVariants = productData.variants.filter(v => {
+                // Skip if already hydrated
+                if (hydratedAsinsRef.current.has(v.asin)) return false;
+
+                // Special check for current product:
+                // If it's the current product, we usually trust the DOM scrape.
+                // BUT, if the DOM scrape yielded poor results (<= 3 images), we force a background fetch
+                // to see if the raw HTML source has more data (often better for Bundles).
+                if (v.asin === productData.asin) {
+                    const currentCount = v.images?.length || 0;
+                    if (currentCount > 3) return false; // Trust 4+ images
+                    // If <= 3, allow hydration (fall through to true)
+                }
+
+                // Otherwise, ALWAYS fetch to ensure we have the full 8-10 image gallery
+                return true;
+            });
+
+            if (incompleteVariants.length === 0) return;
+
+            // Process sequentially to avoid flooding the browser/network
+            for (const variant of incompleteVariants) {
+                if (hydratedAsinsRef.current.has(variant.asin)) continue;
+                hydratedAsinsRef.current.add(variant.asin); // Mark as in-progress
+
+                try {
+                    // console.log(`Hydrating gallery for variant: ${variant.asin}`);
+                    const response = await browser.runtime.sendMessage({
+                        type: 'FETCH_VARIANT_GALLERY',
+                        asin: variant.asin
+                    });
+
+                    if (response && (response.images?.length > 0 || response.videos?.length > 0)) {
+                        // Always update if we got valid data back
+                        // console.log(`Hydration success for ${variant.asin}: ${response.images.length} images`);
+
+                        // Update caches trigger re-render of variant cards
+                        if (response.images?.length > 0) {
+                            setVariantImagesCache(prev => ({
+                                ...prev,
+                                [variant.asin]: dedupeUrls(response.images)
+                            }));
+                        }
+                        // Always update videos, even if empty, to ensure we don't bleed over main product videos
+                        // But only if the response actually contained a videos array (even empty)
+                        if (response.videos !== undefined) {
+                            setVariantVideosCache(prev => ({
+                                ...prev,
+                                [variant.asin]: response.videos
+                            }));
+                        }
+                    }
+                } catch (e) {
+                    console.error(`Hydration failed for ${variant.asin}`, e);
+                }
+
+                // Small delay between requests to be polite to Amazon
+                await new Promise(r => setTimeout(r, 1000));
+            }
+        };
+
+        // Run hydration with a small initial delay to let the main UI settle
+        const timer = setTimeout(hydrateIncompleteVariants, 2000);
+        return () => clearTimeout(timer);
+
+    }, [productData?.variants, variantImagesCache]); // Re-check if cache updates or variants change
+
+
     useEffect(() => {
         // Initial load with scrolling
         loadData(true);
@@ -985,89 +1071,11 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         setVariantDropdownOpen(false);
 
         try {
-            const success = await selectVariant(asin);
-            if (success) {
-                let attempts = 0;
-                const maxAttempts = 5;
-
-                const pollData = async () => {
-                    attempts++;
-                    // Faster interval for automatic sync (400ms instead of 800ms)
-                    await new Promise(r => setTimeout(r, 400));
-                    try {
-                        const newData = await scrapeProductData(false);
-                        if (newData) {
-                            const enrichedData = enrichProductData(newData);
-                            const newVariant = enrichedData?.variants?.find(v => v.asin === asin || v.selected);
-
-                            if (newVariant?.asin === asin) {
-                                // AUTHORITY SYNC: Trust the live website gallery above all else
-                                // enrichedData already contains fresh images from scrapeCurrentGalleryImages()
-                                const officialImages = newVariant.images || [];
-
-                                if (enrichedData && enrichedData.variants) {
-                                    const existingVariants = productDataRef.current?.variants || [];
-
-                                    enrichedData.variants = enrichedData.variants.map(v => {
-                                        if (v.asin === asin) {
-                                            // 1. Force the official set from the website gallery
-                                            const finalImages = [...officialImages];
-
-                                            // 2. Lock this into cache immediately
-                                            setVariantImagesCache(prev => ({ ...prev, [asin]: [...finalImages] }));
-
-                                            // 3. Sync main gallery images
-                                            if (enrichedData && finalImages.length > 0) {
-                                                enrichedData.productImages = [...finalImages];
-                                            }
-
-                                            // 4. Preserve Video Sector (Existing logic is right)
-                                            let vidsToEnforce = variantVideosCache[asin] ?? v.videos;
-                                            if (enrichedData && vidsToEnforce && vidsToEnforce.length > 0) {
-                                                enrichedData.videos = [...vidsToEnforce];
-                                            }
-
-                                            return {
-                                                ...v,
-                                                images: finalImages,
-                                                image: finalImages.length > 0 ? finalImages[0] : v.image,
-                                                videos: vidsToEnforce,
-                                                selected: true
-                                            };
-                                        } else {
-                                            // Preserve other variants
-                                            const existingVariant = existingVariants.find(ev => ev.asin === v.asin);
-                                            if (existingVariant) {
-                                                return {
-                                                    ...existingVariant,
-                                                    images: variantImagesCache[v.asin] ?? existingVariant.images,
-                                                    videos: variantVideosCache[v.asin] ?? existingVariant.videos,
-                                                    selected: false
-                                                };
-                                            }
-                                            return { ...v, selected: false };
-                                        }
-                                    });
-                                }
-                                setProductData(enrichedData);
-                                setSelectingVariant(false);
-                                return;
-                            } else if (attempts >= maxAttempts) {
-                                setSelectingVariant(false);
-                                return;
-                            }
-                            await pollData();
-                        }
-                    } catch (e) {
-                        if (attempts < maxAttempts) await pollData();
-                        else setSelectingVariant(false);
-                    }
-                };
-                await pollData();
-            } else {
-                setSelectingVariant(false);
-            }
+            // Trigger the selection on the page, but DO NOT update/poll for new data
+            await selectVariant(asin);
         } catch (err) {
+            console.error('Variant selection failed', err);
+        } finally {
             setSelectingVariant(false);
         }
     };
@@ -1693,10 +1701,11 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 if (tab.id === 'product') setSubTab('images');
                             }}
                             style={{
+                                flex: 1, // Distribute space equally
                                 display: 'flex',
                                 alignItems: 'center',
+                                justifyContent: 'center', // Center content within the tab
                                 gap: '8px',
-                                borderBottom: `3px solid ${isActive ? COLORS.primary : 'transparent'}`,
                                 color: isActive ? COLORS.primary : COLORS.textMuted, // Reduced inactive contrast
                                 cursor: 'pointer',
                                 transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
@@ -1707,12 +1716,25 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                 opacity: isActive ? 1 : 0.8
                             }}
                         >
+                            {/* Active Indicator (Absolute to prevent layout shift) */}
+                            {isActive && (
+                                <div style={{
+                                    position: 'absolute',
+                                    bottom: 0,
+                                    left: 0,
+                                    width: '100%',
+                                    height: '3px',
+                                    background: COLORS.primary,
+                                    borderTopLeftRadius: '3px',
+                                    borderTopRightRadius: '3px'
+                                }} />
+                            )}
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={isActive ? "3" : "1.8"} style={{ opacity: isActive ? 1 : 0.6 }}>
                                 <path d={tab.icon} />
                             </svg>
                             <span style={{
-                                fontSize: isActive ? '14px' : '13px',
-                                fontWeight: isActive ? 900 : 500,
+                                fontSize: isActive ? '13px' : '12px',
+                                fontWeight: isActive ? 700 : 500,
                             }}>
                                 {tab.label}
                             </span>
@@ -1744,7 +1766,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
     // Action Bar (Secondary Header with Stats & Download) - LAYER 2 (Context + Actions)
     const renderActionBar = () => {
-        if (!isProductPage) return null;
+        // Now rendered for both Product and Listing pages
+        if (!isProductPage && !isListingPage) return null;
 
         const isVariantView = mainTab === 'product' && subTab === 'images';
 
@@ -1752,7 +1775,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             <div style={{
                 display: 'flex',
                 alignItems: 'center',
-                justifyContent: (isVariantView || mainTab === 'review') ? 'space-between' : 'flex-end',
+                justifyContent: (isVariantView || mainTab === 'review' || isListingPage) ? 'space-between' : 'flex-end',
                 padding: '0 16px',
                 height: '40px', // More compact context row
                 background: COLORS.background,
@@ -1762,7 +1785,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             }}>
                 {/* Left Side: Subtler Stats (Demoted counts) */}
                 <div style={{ display: 'flex', alignItems: 'center' }}>
-                    {(isVariantView || mainTab === 'review') && (
+                    {(isVariantView || mainTab === 'review') && isProductPage && (
                         <div style={{ fontSize: '12.5px', fontWeight: 500, color: COLORS.textMuted, display: 'flex', alignItems: 'center', gap: '16px' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
                                 <span>Images</span>
@@ -1778,6 +1801,15 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             </div>
                         </div>
                     )}
+                    {isListingPage && (
+                        <div style={{
+                            fontSize: '14px',
+                            fontWeight: 700,
+                            color: COLORS.primary,
+                        }}>
+                            Listed Products: {filteredListingProducts.length}
+                        </div>
+                    )}
                 </div>
 
                 {/* Right Side: Primary Download All Action */}
@@ -1787,7 +1819,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                         disabled={!!downloadingAsin && downloadingAsin === productData?.asin}
                         className="download-main-btn"
                         style={{
-                            padding: '4px 12px', // Reduced height
+                            height: '28px', // Fixed height for perfect centering
+                            padding: '0 12px', // Horizontal padding only
                             minWidth: '120px',
                             background: COLORS.primarySoft,
                             color: COLORS.primary,
@@ -2239,7 +2272,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }}>
                                         <div style={{ minWidth: 0, flex: 1 }}>
                                             <h4 style={{
-                                                fontSize: '14.5px', // Slightly larger / dominant
+                                                fontSize: '14px', // Slightly larger / dominant
                                                 fontWeight: 600, // Reduced from 800
                                                 color: '#475569', // Softer Slate 600 (was Slate 700)
                                                 margin: 0, display: '-webkit-box', WebkitLineClamp: 2,
@@ -2251,7 +2284,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
                                             <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '2px' }}>
                                                 <span style={{
-                                                    fontSize: '10.5px', // More prominent
+                                                    fontSize: '9.5px', // More prominent
                                                     // fontSize: '10.5px', // Keep font size
                                                     color: COLORS.textMuted, // Much lighter (was textSecondary)
                                                     fontWeight: 500, // Reduced from 700
@@ -2489,28 +2522,28 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                         href="https://www.thinksolv.com/contact"
                         target="_blank"
                         rel="noopener noreferrer"
-                        style={{ fontSize: '11px', fontWeight: 500, color: COLORS.textMuted, textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.2s', opacity: 0.8 }}
-                        onMouseEnter={(e) => { e.currentTarget.style.color = COLORS.primary; e.currentTarget.style.opacity = '1'; }}
-                        onMouseLeave={(e) => { e.currentTarget.style.color = COLORS.textMuted; e.currentTarget.style.opacity = '0.8'; }}
+                        style={{ fontSize: '12px', fontWeight: 500, color: COLORS.textSecondary, textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.2s' }}
+                        onMouseEnter={(e) => { e.currentTarget.style.color = COLORS.primary; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.color = COLORS.textSecondary; }}
                     >
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ opacity: 0.7 }}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                             <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path>
                             <polyline points="22,6 12,13 2,6"></polyline>
                         </svg>
                         Contact
                     </a>
 
-                    <div style={{ width: '1px', height: '12px', background: COLORS.borderLight }}></div>
+                    <div style={{ width: '1px', height: '14px', background: COLORS.border }}></div>
 
                     {/* Help Docs */}
                     <a
                         href="#"
                         onClick={(e) => { e.preventDefault(); }}
-                        style={{ fontSize: '11px', fontWeight: 500, color: COLORS.textMuted, textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.2s', cursor: 'pointer', opacity: 0.8 }}
-                        onMouseEnter={(e) => { e.currentTarget.style.color = COLORS.primary; e.currentTarget.style.opacity = '1'; }}
-                        onMouseLeave={(e) => { e.currentTarget.style.color = COLORS.textMuted; e.currentTarget.style.opacity = '0.8'; }}
+                        style={{ fontSize: '12px', fontWeight: 500, color: COLORS.textSecondary, textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.2s', cursor: 'pointer' }}
+                        onMouseEnter={(e) => { e.currentTarget.style.color = COLORS.primary; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.color = COLORS.textSecondary; }}
                     >
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ opacity: 0.7 }}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                             <circle cx="12" cy="12" r="10"></circle>
                             <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
                             <line x1="12" y1="17" x2="12.01" y2="17"></line>
@@ -2661,7 +2694,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             background: COLORS.background,
                             display: 'flex',
                             flexDirection: 'column',
-                            padding: (isProductPage && mainTab === 'review' && isReviewSplitView) ? '24px 16px 0 16px' : '24px 16px 60px 16px', // No bottom padding for split view (scrollbar reset)
+                            padding: (isProductPage && mainTab === 'review' && isReviewSplitView) ? '12px 16px 0 16px' : '12px 16px 60px 16px', // No bottom padding for split view (scrollbar reset)
                             boxSizing: 'border-box'
                         }}>
                             {/* Product Variants List */}
@@ -2704,71 +2737,6 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                             {/* Listing Page Content */}
                             {isListingPage && (
                                 <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                                    {/* Listing Actions */}
-                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
-                                        <div style={{ fontSize: '13px', fontWeight: 600, color: COLORS.text, textTransform: 'uppercase' }}>
-                                            LISTED PRODUCTS: {filteredListingProducts.length}
-                                        </div>
-                                        <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-                                            <button
-                                                onClick={downloadAll}
-                                                disabled={!!downloadingAsin}
-                                                style={{
-                                                    padding: '6px 14px',
-                                                    background: COLORS.primary,
-                                                    color: '#fff',
-                                                    borderRadius: '8px',
-                                                    fontSize: '12px',
-                                                    fontWeight: 700,
-                                                    border: 'none',
-                                                    cursor: downloadingAsin ? 'wait' : 'pointer',
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    gap: '6px',
-                                                    opacity: downloadingAsin ? 0.7 : 1,
-                                                    boxShadow: COLORS.shadowPrimary
-                                                }}
-                                            >
-                                                {downloadingAsin ? (
-                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: 'spin 1.5s linear infinite' }}>
-                                                        <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                                                    </svg>
-                                                ) : (
-                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-                                                )}
-                                                <span>
-                                                    {selectedItems.size > 0
-                                                        ? `Download (${selectedItems.size})`
-                                                        : 'Download All'}
-                                                </span>
-                                            </button>
-
-                                            {/* Listing Background Task Pill */}
-                                            {downloadingAsin && (
-                                                <div style={{
-                                                    position: 'absolute',
-                                                    top: '100%',
-                                                    right: 0,
-                                                    marginTop: '6px',
-                                                    padding: '4px 10px',
-                                                    background: COLORS.surface,
-                                                    borderRadius: '12px',
-                                                    border: `1px solid ${COLORS.borderLight}`,
-                                                    boxShadow: '0 4px 8px rgba(0,0,0,0.1)',
-                                                    zIndex: 50,
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    gap: '6px',
-                                                    animation: 'fadeInSlide 0.2s ease-out',
-                                                    whiteSpace: 'nowrap'
-                                                }}>
-                                                    <div style={{ width: '10px', height: '10px', border: `2px solid ${COLORS.primary}`, borderRadius: '50%', borderTopColor: 'transparent', animation: 'spin 1s linear infinite' }}></div>
-                                                    <span style={{ fontSize: '10px', fontWeight: 700, color: COLORS.textSecondary }}>Completing previous download...</span>
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-
                                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '8px' }}>
                                         {filteredListingProducts.map((product, index) => renderListingProduct(product, index))}
                                     </div>
