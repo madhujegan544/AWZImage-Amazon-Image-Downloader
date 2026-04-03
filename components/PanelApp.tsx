@@ -1,4 +1,3 @@
-
 /**
  * PIXORA - Premium Amazon Media Downloader
  * Main Panel Application Component
@@ -108,23 +107,36 @@ const truncateText = (text: string, maxLength: number): string => {
     return text.substring(0, maxLength).trim() + '...';
 };
 
+/**
+ * Extracts the core Amazon Image ID for robust deduplication.
+ * UNIFIED PATTERN: Only captures alphanumeric characters (the core ID).
+ * This matches content.ts and variantScraper.ts for consistent deduplication.
+ */
 const getImageId = (url: string): string => {
     try {
         let decoded = url;
         try { decoded = decodeURIComponent(url); } catch { /* ignore */ }
         const cleaned = decoded.split('?')[0];
+
+        // Capture only alphanumeric characters (stops at first non-alphanumeric)
         const match = cleaned.match(/images\/I\/([A-Za-z0-9]+)/);
         if (match) return match[1];
+
         const filenameMatch = cleaned.match(/\/([A-Za-z0-9]{8,})/);
         if (filenameMatch) return filenameMatch[1];
+
         return cleaned;
     } catch { return url; }
 };
 
+/**
+ * Deduplicates a list of image URLs based on their core Amazon Image ID.
+ */
 const dedupeUrls = (urls: string[]): string[] => {
     if (!urls) return [];
     const seen = new Set<string>();
     const unique: string[] = [];
+
     urls.forEach(url => {
         if (!url) return;
         const id = getImageId(url);
@@ -133,16 +145,26 @@ const dedupeUrls = (urls: string[]): string[] => {
             unique.push(url);
         }
     });
+
     return unique;
 };
 
+/**
+ * Resolves the full image list for a specific variant using tiered matching.
+ */
 const resolveVariantImages = (variant: { asin: string, name: string }, data: ProductData): string[] => {
     let images: string[] = [];
+
+    // PRIORITY 1: Match by ASIN
     if (data.variantImagesByAsin?.[variant.asin]) {
         images = data.variantImagesByAsin[variant.asin];
-    } else if (data.variantImages?.[variant.name]) {
+    }
+    // PRIORITY 2: Match by exact Name
+    else if (data.variantImages?.[variant.name]) {
         images = data.variantImages[variant.name];
-    } else if (data.variantImages) {
+    }
+    // PRIORITY 3: Loose name matching
+    else if (data.variantImages) {
         const cleanName = variant.name.replace(/^Select\s+/, '').trim();
         const matchingKey = Object.keys(data.variantImages).find(k =>
             k === cleanName || k === variant.name ||
@@ -151,6 +173,7 @@ const resolveVariantImages = (variant: { asin: string, name: string }, data: Pro
         );
         if (matchingKey) images = data.variantImages[matchingKey];
     }
+
     return dedupeUrls(images);
 };
 
@@ -182,9 +205,11 @@ const enrichProductData = (data: ProductData | null): ProductData | null => {
 
 const getMediaItems = (data: ProductData | null, overrideAsin?: string | null): MediaItem[] => {
     if (!data) return [];
+
     const items: MediaItem[] = [];
     const seenIds = new Set<string>();
 
+    // Helper to add item with deduplication
     const addItem = (url: string, type: 'image' | 'video', source: 'product' | 'review', category: MediaItem['category']) => {
         const id = type === 'image' ? getImageId(url) : url.split('?')[0];
         if (!seenIds.has(id)) {
@@ -202,22 +227,36 @@ const getMediaItems = (data: ProductData | null, overrideAsin?: string | null): 
         ? data.variants?.find(v => v.asin === overrideAsin)
         : data.variants?.find(v => v.selected);
 
-    if (!selectedVariant) selectedVariant = data.variants?.find(v => v.selected);
+    // Fallback if override variant not found (shouldn't happen if valid ASIN)
+    if (!selectedVariant) {
+        selectedVariant = data.variants?.find(v => v.selected);
+    }
+
     const hasVariants = data.variants && data.variants.length > 0;
 
     if (selectedVariant) {
+        // PRIORITY 1: Use images stored directly in the selected variant (enriched by enrichProductData)
         if (selectedVariant.images && selectedVariant.images.length > 0) {
             displayImages = selectedVariant.images;
-        } else if (selectedVariant.asin && data.variantImagesByAsin && data.variantImagesByAsin[selectedVariant.asin]) {
+        }
+        // PRIORITY 2: Lookup by ASIN in variantImagesByAsin
+        else if (selectedVariant.asin && data.variantImagesByAsin &&
+            data.variantImagesByAsin[selectedVariant.asin] &&
+            data.variantImagesByAsin[selectedVariant.asin].length > 0) {
             displayImages = data.variantImagesByAsin[selectedVariant.asin];
-        } else if (data.variantImages) {
+        }
+        // PRIORITY 3: Lookup by name in variantImages
+        else if (data.variantImages) {
             const cleanName = selectedVariant.name?.replace(/^Select\s+/, '').trim();
             const matchingKey = Object.keys(data.variantImages).find(k =>
-                k === selectedVariant.name || k === cleanName ||
+                k === selectedVariant.name ||
+                k === cleanName ||
                 k.toLowerCase().includes(cleanName?.toLowerCase() || '') ||
                 cleanName?.toLowerCase().includes(k.toLowerCase())
             );
-            if (matchingKey) displayImages = data.variantImages[matchingKey];
+            if (matchingKey && data.variantImages[matchingKey]?.length > 0) {
+                displayImages = data.variantImages[matchingKey];
+            }
         }
 
         // VIDEO RESOLUTION: Use variant-specific videos when available
@@ -266,22 +305,22 @@ const getMediaItems = (data: ProductData | null, overrideAsin?: string | null): 
         addItem(url, 'image', 'review', 'reviewImage');
     });
 
-    let displayVideos = data.productVideos || data.videos || [];
-    if (selectedVariant && selectedVariant.videos && selectedVariant.videos.length > 0) {
-        displayVideos = selectedVariant.videos;
-    }
-    displayVideos.forEach(url => addItem(url, 'video', 'product', 'productVideo'));
-    (data.reviewImages || []).forEach(url => addItem(url, 'image', 'review', 'reviewImage'));
-    (data.reviewVideos || []).forEach(url => addItem(url, 'video', 'review', 'reviewVideo'));
+    (data.reviewVideos || []).forEach(url => {
+        addItem(url, 'video', 'review', 'reviewVideo');
+    });
 
     return items;
 };
+
 
 // ============================================
 // Main Component
 // ============================================
 function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }: PanelAppProps) {
+    // View State
     const [view, setView] = useState<ViewState>('main');
+
+    // Data State
     const [productData, setProductData] = useState<ProductData | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -289,6 +328,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     const [downloadSuccess, setDownloadSuccess] = useState(false);
     const [previewUrl, setPreviewUrl] = useState<string | null>(null); // Added for preview
 
+    // Selection State
     const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
 
     // Page Context State
@@ -298,10 +338,14 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     // UI State
     const [searchTerm, setSearchTerm] = useState('');
     const [activeSearchTerm, setActiveSearchTerm] = useState('');
+    const [variantDropdownOpen, setVariantDropdownOpen] = useState(false);
     const [mainTab, setMainTab] = useState<MainTab>('product');
     const [subTab, setSubTab] = useState<SubTab>('images');
+    const [showAllItems, setShowAllItems] = useState(false);
     const [selectingVariant, setSelectingVariant] = useState(false);
+    const [variantStartIndex, setVariantStartIndex] = useState(0);
     const [selectedVariantAsin, setSelectedVariantAsin] = useState<string | null>(null);
+    // Per-ASIN cache for variant images - preserves correct images for ALL variants across selections
     const [variantImagesCache, setVariantImagesCache] = useState<Record<string, string[]>>({});
     // Per-ASIN cache for variant videos - preserves correct videos for ALL variants across selections
     const [variantVideosCache, setVariantVideosCache] = useState<Record<string, string[]>>({});
@@ -358,49 +402,25 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     const isProductPage = productData?.pageType === 'product';
     const isListingPage = productData?.pageType === 'listing';
 
-    // Create baseVariants for list rendering
-    const allVariants = useMemo(() => {
-        let baseVariants = productData?.variants || [];
-        if (baseVariants.length === 0 && productData) {
-            baseVariants = [{
-                asin: productData.asin,
-                name: productData.title,
-                image: productData.productImages?.[0] || '',
-                available: true,
-                selected: true,
-                images: productData.productImages || [],
-                videos: productData.videos || []
-            }];
-        }
-        return baseVariants.map(v => {
-            const cachedImages = variantImagesCache[v.asin];
-            const cachedVideos = variantVideosCache[v.asin];
-
-            let updated = { ...v };
-
-            if (cachedImages && cachedImages.length > 0) {
-                updated.images = cachedImages;
-                updated.image = cachedImages[0] || v.image;
-            }
-
-            if (cachedVideos && cachedVideos.length > 0) {
-                updated.videos = cachedVideos;
-            }
-
-            return updated;
-        });
-    }, [productData, variantImagesCache, variantVideosCache]);
-
+    // Filtered media items based on current active tab
     const filteredMediaItems = useMemo(() => {
         if (isListingPage) return allMediaItems;
+
         if (mainTab === 'product') {
-            return subTab === 'images' ?
-                allMediaItems.filter(i => i.category === 'productImage') :
-                allMediaItems.filter(i => i.category === 'productVideo');
+            if (subTab === 'images') {
+                return allMediaItems.filter(i => i.category === 'productImage');
+            } else {
+                return allMediaItems.filter(i => i.category === 'productVideo');
+            }
         } else if (mainTab === 'review') {
-            return subTab === 'images' ?
-                allMediaItems.filter(i => i.category === 'reviewImage') :
-                allMediaItems.filter(i => i.category === 'reviewVideo');
+            // "if the user is on the Reviews page, only review images and videos should be downloaded"
+            // For the Review tab, we filter based on subTab for DISPLAY, 
+            // but the download function will handle the "both" requirement.
+            if (subTab === 'images') {
+                return allMediaItems.filter(i => i.category === 'reviewImage');
+            } else {
+                return allMediaItems.filter(i => i.category === 'reviewVideo');
+            }
         }
         return allMediaItems;
     }, [allMediaItems, mainTab, subTab, isListingPage]);
@@ -607,9 +627,13 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
     }, []);
 
     useEffect(() => {
-        let isMounted = true;
+        productDataRef.current = productData;
+    }, [productData]);
 
-        const load = async () => {
+    const loadData = useCallback(async (triggerScroll: boolean = false) => {
+        // Only show full loading spinner for initial load or manual scroll refresh
+        // Background updates (triggerScroll=false) should be silent
+        if (triggerScroll) {
             setLoading(true);
         }
 
@@ -991,52 +1015,57 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
             }
         };
 
-        load();
+        // Add listener
+        browser.runtime.onMessage.addListener(handleMessage);
 
-        // Polling
-        const interval = setInterval(async () => {
-            if (!downloading && !selectingVariant) {
-                const data = await scrapeProductData(false);
-                if (isMounted && data) {
-                    setProductData(prev => {
-                        // Keep current selection state if same ASIN
-                        if (prev && prev.asin === data.asin) return { ...data, variants: prev.variants }; // Simplified update
-                        return data;
-                    });
-                }
-            }
-        }, 2000);
+        // Cleanup
+        return () => {
+            browser.runtime.onMessage.removeListener(handleMessage);
+        };
+    }, [loadData]);
 
-        return () => { isMounted = false; clearInterval(interval); };
-    }, [scrapeProductData, downloading, selectingVariant]);
-
-    // Cache Persistence Effect - Automatically capture videos/images from active variants
+    // Close dropdown when clicking outside
     useEffect(() => {
-        if (!productData?.variants) return;
+        const handleClickOutside = () => setVariantDropdownOpen(false);
+        if (variantDropdownOpen) {
+            document.addEventListener('click', handleClickOutside);
+            return () => document.removeEventListener('click', handleClickOutside);
+        }
+    }, [variantDropdownOpen]);
 
-        setVariantVideosCache(prev => {
-            const next = { ...prev };
-            let hasChanges = false;
+    // ============================================
+    // Preview Function
+    // ============================================
+    const handlePreview = (item: MediaItem) => {
+        if (showPreview) {
+            const urls = getPreviewUrls(item);
+            showPreview(item.url, item.type, urls);
+        }
+    };
 
-            productData.variants.forEach(v => {
-                if (v.videos && v.videos.length > 0) {
-                    // Only update if we have MORE videos or different ones
-                    const prevVids = next[v.asin] || [];
-                    if (v.videos.length > prevVids.length || !prevVids.every((val, i) => val === v.videos![i])) {
-                        next[v.asin] = v.videos;
-                        hasChanges = true;
-                    }
-                }
-            });
+    // ============================================
+    // Variant Selection
+    // ============================================
+    const handleVariantSelect = async (asin: string, variantName: string, variantImages?: string[], variantVideos?: string[]) => {
+        if (!selectVariant || selectingVariant) return;
 
-            return hasChanges ? next : prev;
-        });
-    }, [productData]);
+        // Auto-preview logic: Show the main image (or video if no images) immediately
+        if (showPreview) {
+            const hasImages = variantImages && variantImages.length > 0;
+            const hasVideos = variantVideos && variantVideos.length > 0;
 
-    // Handlers
-    const handleVariantSelect = async (asin: string, name: string, images?: string[], videos?: string[]) => {
-        if (!selectVariant) return;
-        setSelectingVariant(true);
+            if (hasImages || hasVideos) {
+                // Construct the full context: Images first, then Videos (Standard Gallery Order)
+                const allUrls = [...(variantImages || []), ...(variantVideos || [])];
+
+                // Show the first item (Image #1 or Video #1)
+                const targetUrl = allUrls[0];
+                const targetType = hasImages ? 'image' : 'video';
+
+                showPreview(targetUrl, targetType, allUrls);
+            }
+        }
+
         setSelectedVariantAsin(asin);
         setSelectingVariant(true);
         setVariantDropdownOpen(false);
@@ -1152,8 +1181,6 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
         if (items.length === 0) { setDownloadingAsin(null); return; }
 
-    const downloadAll = async () => {
-        setDownloading(true);
         try {
             const baseFilename = `pixora-${productData.asin || 'media'}-${categoryLabel}-${Date.now()}`;
 
@@ -1213,9 +1240,13 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         }
     };
 
-    const handleRefresh = async () => {
-        setLoading(true);
-        await scrapeProductData(true).then(d => d && setProductData(d)).finally(() => setLoading(false));
+    const downloadSingle = async (url: string) => {
+        try {
+            const filename = `pixora-${Date.now()}`;
+            await downloadZip([url], filename);
+        } catch (err) {
+            console.error('Single download failed:', err);
+        }
     };
 
 
@@ -1330,10 +1361,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
 
         return (
             <div
-                key={`${item.url}-${index}`}
-                onClick={() => handlePreview(item)}
-                title="Click to preview"
-                className="media-item"
+                key={`${product.asin}-${index}`}
                 style={{
                     background: COLORS.surface,
                     borderRadius: '8px', // Match Variant Card
@@ -1345,15 +1373,11 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                     flexDirection: 'column',
                     boxSizing: 'border-box'
                 }}
+                className="listing-product"
             >
-                {isVideo ? (
-                    <video src={item.url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                ) : (
-                    <img src={item.url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" />
-                )}
-                {isVideo && <div style={{ position: 'absolute', top: 5, left: 5, background: 'rgba(0,0,0,0.6)', color: 'white', fontSize: 9, padding: '2px 4px', borderRadius: 4 }}>VIDEO</div>}
                 <div
-                    onClick={(e) => toggleSelection(item.url, e)}
+                    onClick={() => handlePreview({ url: product.image, type: 'image', source: 'product', category: 'productImage' })}
+                    title="Click to preview"
                     style={{
                         aspectRatio: '1',
                         position: 'relative',
@@ -2187,15 +2211,21 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 boxSizing: 'border-box'
             }}>
                 {allVariants.map((variant) => {
-                    const isCurrent = selectedVariantAsin ? selectedVariantAsin === variant.asin : variant.selected;
+                    // Fix: Check manual selection first, then fallback to data selection
+                    const isCurrent = selectedVariantAsin
+                        ? selectedVariantAsin === variant.asin
+                        : variant.selected;
+
                     const imageCount = variant.images?.length || 0;
                     const videoCount = variant.videos?.length || 0;
+                    const totalCount = imageCount + videoCount;
 
                     return (
                         <div
                             key={variant.asin}
                             onClick={() => !selectingVariant && handleVariantSelect(variant.asin, variant.name, variant.images, variant.videos)}
                             className="variant-card"
+                            title="Click to preview variant"
                             style={{
                                 background: isCurrent
                                     ? '#EFF6FF'
@@ -2237,6 +2267,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                     backgroundColor: COLORS.backgroundSecondary, flexShrink: 0,
                                     border: `1px solid ${COLORS.borderLight}`
                                 }} />
+
                                 <div style={{ flex: 1, minWidth: 0 }}>
                                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }}>
                                         <div style={{ minWidth: 0, flex: 1 }}>
@@ -2391,11 +2422,12 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                         </>
                                     )}
                                 </div>
+
                                 <button
                                     onClick={(e) => {
                                         e.stopPropagation();
                                         const allMedia = [...(variant.images || []), ...(variant.videos || [])];
-                                        if (allMedia.length > 0) downloadZip(allMedia, `pixora-${variant.asin}-media`);
+                                        if (allMedia.length > 0) downloadZip(allMedia, `pixora-${variant.asin}`);
                                     }}
                                     disabled={selectingVariant}
                                     title={`Download media for ${variant.name}`}
@@ -2442,10 +2474,6 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
         );
     };
 
-    const renderReviewDrawer = () => {
-        const reviewCount = persistentReviews.length;
-        if (!isProductPage) return null;
-        if (!reviewSectionExpanded) return null;
 
 
     // Check if we have content
@@ -2705,6 +2733,8 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                                     )}
                                 </div>
                             )}
+
+                            {/* Listing Page Content */}
                             {isListingPage && (
                                 <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '16px' }}>
                                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '8px' }}>
@@ -2792,7 +2822,7 @@ function PanelApp({ scrapeProductData, downloadZip, showPreview, selectVariant }
                 @keyframes shimmer { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
                 @keyframes checkBounce { 0% { transform: scale(0.8); } 50% { transform: scale(1.2); } 100% { transform: scale(1.0); } }
             `}</style>
-        </div>
+        </div >
     );
 }
 
